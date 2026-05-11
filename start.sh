@@ -42,7 +42,7 @@ fi
 # ── ensure Ollama is running ──────────────────────────────────────────────────
 if ! pgrep -x ollama >/dev/null 2>&1; then
     yellow "Starting Ollama..."
-    ollama serve > /tmp/ollama.log 2>&1 &
+    OLLAMA_KEEP_ALIVE=-1 ollama serve > /tmp/ollama.log 2>&1 &
     sleep 3
 fi
 
@@ -80,6 +80,13 @@ for i in $(seq 1 15); do
     if curl -sf "http://localhost:$PORT/status" >/dev/null 2>&1; then
         green "Miser ready on http://localhost:$PORT"
         green "  Log: $LOGFILE  |  PID: $(cat $PIDFILE)"
+        # Trigger LLM warmup in background (miser.py also does this, belt+suspenders)
+        python3 -c "
+import sys; sys.path.insert(0, '$MISER_DIR')
+from client import W
+try: W.ask('ok', max_tokens=1)
+except: pass
+" > /dev/null 2>&1 &
         exit 0
     fi
 done

@@ -251,11 +251,12 @@ class ModelAdapter:
 
         if self._raw:
             return {
-                "model":  self.model,
-                "prompt": build_prompt(self.family, system, user),
-                "options": opts,
-                "stream": False,
-                "raw": True,
+                "model":    self.model,
+                "prompt":   build_prompt(self.family, system, user),
+                "options":  opts,
+                "stream":   False,
+                "raw":      True,
+                "keep_alive": -1,
             }
         else:
             messages = []
@@ -263,10 +264,11 @@ class ModelAdapter:
                 messages.append({"role": "system", "content": system})
             messages.append({"role": "user", "content": user})
             return {
-                "model":    self.model,
-                "messages": messages,
-                "options":  opts,
-                "stream":   False,
+                "model":      self.model,
+                "messages":   messages,
+                "options":    opts,
+                "stream":     False,
+                "keep_alive": -1,
             }
 
     def extract_text(self, response_json: dict) -> str:

@@ -103,7 +103,7 @@ else
 Miser runs at \`http://localhost:7860\`. Use it to avoid burning API tokens on
 file ops and LLM tasks — it runs on your machine at zero cloud cost.
 
-**Auto-start check** (already wired in via system service — this is a fallback):
+**Auto-start + LLM warmup** (paste at top of every session, or leave in CLAUDE.md):
 \`\`\`python
 import sys; sys.path.insert(0, '$MISER_DIR')
 from client import W
@@ -112,7 +112,9 @@ except:
     import subprocess, time
     subprocess.Popen(['bash', '$MISER_DIR/start.sh'],
                      stdout=open('/tmp/miser.log', 'w'), stderr=subprocess.STDOUT)
-    time.sleep(4)
+    time.sleep(5)
+import threading
+threading.Thread(target=lambda: W.ask('ok', max_tokens=1), daemon=True).start()
 \`\`\`
 
 **Decision rules — follow these strictly:**

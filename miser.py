@@ -697,6 +697,17 @@ if __name__ == "__main__":
         daemon=True
     ).start()
 
+    def _warmup():
+        """Pre-load the LLM into memory so it's ready on first real request."""
+        time.sleep(3)
+        try:
+            payload = adapter.generate_payload("", "ok", max_tokens=1)
+            req.post(adapter.url, json=payload, timeout=60)
+            console.print("[dim green]✓ LLM warmed up[/dim green]")
+        except Exception:
+            pass
+    threading.Thread(target=_warmup, daemon=True).start()
+
     console.print(Panel(
         "[bold cyan]Miser v1.0[/bold cyan]  ·  Claude Code's local co-processor\n\n"
         "[bold]Zero-LLM endpoints (<50ms):[/bold]\n"
