@@ -1,10 +1,8 @@
 """
-Wingman v1.0 — Claude Code's local assistant.
-Offloads file ops, shell, and routine LLM tasks to a local model.
-
+Wingman v1.1 — Claude Code's local co-processor.
 Two execution paths:
-  1. Deterministic (0 LLM cost): shell, file read/write/grep/tree/exists/outline/patch
-  2. Local LLM: summarize, codegen, ask — never touches Claude API
+  1. Zero-LLM (<50ms): shell, file read/write/grep/tree/exists/outline/patch
+  2. Local LLM (no API cost): summarize, codegen, explain, fix, test, review, git_summary
 """
 
 import os, json, threading, time, re, subprocess, math, fnmatch
@@ -20,22 +18,24 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.rule import Rule
 
+from model_adapter import ModelAdapter
+from fan import fan_max, fan_auto, fan_status
+
 console = Console()
 app = Flask(__name__)
+
 MEMORY_FILE = Path(__file__).parent / "memory.json"
 EMBED_FILE  = Path(__file__).parent / "embeddings.json"
-OLLAMA      = "http://localhost:11434/api/chat"
 EMBED_URL   = "http://localhost:11434/api/embeddings"
 EMBED_MODEL = "nomic-embed-text"
-MODEL       = "wingman-qwen"
+MODEL       = os.environ.get("WINGMAN_MODEL", "wingman-qwen")
 
-# ── token savings counter ───────────────────────────────────────────────────────
-# Rough estimate: 1 char ≈ 0.4 tokens (Chinese/code mix)
+adapter = ModelAdapter(MODEL)
+
 _tokens_saved = 0
-
 def _count_saved(chars: int):
     global _tokens_saved
-    _tokens_saved += int(chars * 0.4)
+    _tokens_saved += int(chars / 4)   # ~4 chars per token for code/English
 
 # ── memory ─────────────────────────────────────────────────────────────────────
 
@@ -177,12 +177,11 @@ def _ls(path: str, pattern: str = "*") -> str:
         return f"Path not found: {path}"
     items = sorted(p.glob(pattern))
     return "\n".join(
-        f"{'📁' if i.is_dir() else '📄'} {i.name}  ({i.stat().st_size//1024}KB)"
+        f"{'[dir]' if i.is_dir() else '[file]'} {i.name}  ({i.stat().st_size//1024}KB)"
         for i in items
     ) or "(empty)"
 
 def _grep_file(path: str, pattern: str, context: int = 2, ignore_case: bool = True) -> str:
-    """Return matching lines with surrounding context. Saves reading full files."""
     p = Path(os.path.expanduser(path))
     if not p.exists():
         return f"File not found: {path}"
@@ -206,7 +205,6 @@ def _grep_file(path: str, pattern: str, context: int = 2, ignore_case: bool = Tr
     return "\n".join(matches).rstrip("---").strip() or f"No matches for: {pattern}"
 
 def _tree(path: str, depth: int = 2, exclude: str = "__pycache__,.git,node_modules,.DS_Store") -> str:
-    """Compact directory tree. Way cheaper than ls -la recursion."""
     p = Path(os.path.expanduser(path))
     if not p.exists():
         return f"Path not found: {path}"
@@ -232,7 +230,6 @@ def _tree(path: str, depth: int = 2, exclude: str = "__pycache__,.git,node_modul
     return "\n".join(lines)
 
 def _outline(path: str) -> str:
-    """Extract function/class signatures from Python file. No LLM, pure regex."""
     p = Path(os.path.expanduser(path))
     if not p.exists():
         return f"File not found: {path}"
@@ -245,7 +242,6 @@ def _outline(path: str) -> str:
             indent = len(m.group(1)) // 4
             kind   = m.group(2).strip()
             name   = m.group(3)
-            # grab docstring if present
             doc = ""
             if i + 1 < len(lines):
                 dl = lines[i + 1].strip()
@@ -255,14 +251,12 @@ def _outline(path: str) -> str:
     return "\n".join(results) or "(no functions/classes found)"
 
 def _write_file(path: str, content: str) -> str:
-    """Write content to file. Creates parent dirs as needed."""
     p = Path(os.path.expanduser(path))
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content)
     return f"Written {len(content)} chars to {path}"
 
 def _patch_file(path: str, old: str, new: str) -> str:
-    """Find-and-replace in file. Returns diff summary."""
     p = Path(os.path.expanduser(path))
     if not p.exists():
         return f"File not found: {path}"
@@ -274,72 +268,14 @@ def _patch_file(path: str, old: str, new: str) -> str:
     p.write_text(updated)
     return f"Patched {path}: replaced 1/{count} occurrence(s), {len(old)}→{len(new)} chars"
 
-# ── LLM direct call ─────────────────────────────────────────────────────────────
-
-GENERATE_URL = "http://localhost:11434/api/generate"
-
-def _extract_answer(raw: str, mode: str = "text") -> str:
-    """Pull the actual answer out of qwen3's verbose thinking output."""
-    if not raw:
-        return ""
-    # strip fences
-    raw = re.sub(r"^```[a-zA-Z]*\n?", "", raw.strip())
-    raw = re.sub(r"\n?```$", "", raw)
-    raw = raw.strip()
-
-    if mode == "code":
-        # grab the first clean def block (not inside commentary)
-        m = re.search(r'^def [a-z_]\w*\(', raw, re.MULTILINE)
-        if m:
-            block = raw[m.start():]
-            lines = block.splitlines()
-            result_lines = [lines[0]]
-            for ln in lines[1:]:
-                if ln and not ln.startswith((' ', '\t')) and not ln.startswith('def '):
-                    break
-                result_lines.append(ln)
-            return "\n".join(result_lines).strip()
-
-    if mode == "bullets":
-        # grab first clean set of bullet / numbered lines (stop before repetition)
-        bullets = re.findall(r'^[ \t]*[-•*\d\.]\s+.+', raw, re.MULTILINE)
-        if len(bullets) >= 2:
-            seen, deduped = set(), []
-            for b in bullets:
-                key = b.strip().lower()[:60]
-                if key not in seen:
-                    seen.add(key)
-                    deduped.append(b.strip())
-            return "\n".join(deduped[:8])
-
-    # generic: if thinking leaked (verbose paragraphs), return last coherent block
-    if len(raw) > 600:
-        # look for a concluding block after "So" / "Let's" / blank line transition
-        paras = [p.strip() for p in re.split(r'\n{2,}', raw) if p.strip()]
-        # find last para that doesn't start with meta-commentary verbs
-        meta = re.compile(r'^(we|let\'s|the problem|note:|however|but|so|now|wait|actually)', re.I)
-        clean = [p for p in paras if not meta.match(p)]
-        if clean:
-            return clean[-1]
-        return paras[-1] if paras else raw[-400:]
-
-    return raw
-
+# ── LLM call (fan-aware, model-adaptive) ────────────────────────────────────────
 
 def llm(task: str, system: str = "", max_tokens: int = 600, mode: str = "text") -> str:
-    is_code = mode == "code" or re.search(r'\b(write|def|function|code|implement|class)\b', task, re.I)
+    is_code    = mode == "code"    or re.search(r'\b(write|def|function|code|implement|class)\b', task, re.I)
     is_bullets = mode == "bullets" or re.search(r'\b(summarize|bullet|list|summary|points)\b', task, re.I)
     detected_mode = "code" if is_code and not is_bullets else ("bullets" if is_bullets else "text")
 
-    # qwen3:4b thinking overhead: ~800-2000 tokens. Code needs more room than text.
-    think_budget = 2400 if detected_mode == "code" else 800
-    total_predict = max_tokens + think_budget
-
-    sys_prompt = (
-        "You are Wingman, Claude Code's local secretary.\n"
-        "CRITICAL: After your thinking, output ONLY the final answer with no explanation.\n"
-    )
-    # memory context pollutes content-transformation tasks — only use for open Q&A
+    sys_prompt = "You are Wingman, Claude Code's local assistant.\nOutput ONLY the final answer, no preamble.\n"
     if detected_mode == "text":
         ctx_text = mem.ctx(task)
         if ctx_text:
@@ -347,32 +283,25 @@ def llm(task: str, system: str = "", max_tokens: int = 600, mode: str = "text") 
     if system:
         sys_prompt += system
 
-    # chatml format: inject </think> after user turn → model outputs clean answer immediately
-    raw_prompt = (
-        f"<|im_start|>system\n{sys_prompt}<|im_end|>\n"
-        f"<|im_start|>user\n{task}<|im_end|>\n"
-        f"<|im_start|>assistant\n<think>\n\n</think>\n\n"
-    )
+    payload = adapter.generate_payload(sys_prompt, task, max_tokens=max_tokens)
 
-    for attempt in range(3):
-        try:
-            resp = req.post(GENERATE_URL, json={
-                "model": MODEL,
-                "prompt": raw_prompt,
-                "options": {"num_predict": total_predict, "temperature": 0.2},
-                "stream": False,
-                "raw": True,
-            }, timeout=240)
-            raw = resp.json().get("response", "").strip()
-            if raw:
-                answer = _extract_answer(raw, mode=detected_mode)
-                if answer:
-                    return answer
-            console.print(f"[dim yellow]empty, retry {attempt+1}/3[/dim yellow]")
-        except Exception as e:
-            if attempt == 2:
-                return f"ERROR: {e}"
-    return "(no response)"
+    fan_max()   # spin up before inference
+    try:
+        for attempt in range(3):
+            try:
+                resp = req.post(adapter.url, json=payload, timeout=240)
+                raw  = adapter.extract_text(resp.json())
+                if raw:
+                    answer = adapter.clean(raw, mode=detected_mode)
+                    if answer:
+                        return answer
+                console.print(f"[dim yellow]empty response, retry {attempt+1}/3[/dim yellow]")
+            except Exception as e:
+                if attempt == 2:
+                    return f"ERROR: {e}"
+        return "(no response)"
+    finally:
+        fan_auto()   # restore auto regardless of outcome
 
 # ── routing ──────────────────────────────────────────────────────────────────────
 
@@ -411,13 +340,10 @@ def run_task(task: str, sender: str, system: str = "", max_tokens: int = 600) ->
     st.count += 1
     st.set("WORKING", task)
     ts = datetime.now().strftime("%H:%M:%S")
-
     mode, pre = route(task)
-
     console.print()
     console.print(Rule(f"[cyan]#{st.count}  {ts}  [{mode}]  {sender}[/cyan]"))
     console.print(f"[yellow]▶ {task[:120]}[/yellow]\n")
-
     try:
         result = pre if mode == "direct" else llm(task, system, max_tokens)
         st.result = result
@@ -430,20 +356,22 @@ def run_task(task: str, sender: str, system: str = "", max_tokens: int = 600) ->
         console.print(Panel(result, title="[red]✗[/red]", border_style="red"))
     finally:
         st.set("IDLE", "—")
-
     return result
 
 # ── endpoints ────────────────────────────────────────────────────────────────────
 
 @app.route("/status")
 def status():
+    fs = fan_status()
     return jsonify({
-        "status": st.status,
-        "task": st.task,
-        "count": st.count,
-        "last": st.result,
+        "status":           st.status,
+        "task":             st.task,
+        "count":            st.count,
+        "last":             st.result,
         "tokens_saved_est": _tokens_saved,
-        "model": MODEL,
+        "model":            MODEL,
+        "model_family":     adapter.family,
+        "fan":              fs,
     })
 
 @app.route("/memory")
@@ -452,7 +380,6 @@ def memory():
 
 @app.route("/ask", methods=["POST"])
 def ask():
-    """General purpose. Auto-routes between direct and LLM."""
     d = request.json or {}
     task = d.get("task","").strip()
     if not task: return jsonify({"error":"task required"}), 400
@@ -463,7 +390,6 @@ def ask():
 
 @app.route("/chat", methods=["POST"])
 def chat():
-    """Non-blocking /ask."""
     d = request.json or {}
     task = d.get("task","").strip()
     if not task: return jsonify({"error":"task required"}), 400
@@ -474,7 +400,6 @@ def chat():
 
 @app.route("/run", methods=["POST"])
 def run_cmd():
-    """Direct shell execution, no LLM. Fastest path."""
     d = request.json or {}
     cmd = d.get("cmd","").strip()
     if not cmd: return jsonify({"error":"cmd required"}), 400
@@ -490,80 +415,53 @@ def run_cmd():
         return jsonify({"error": str(e)}), 500
 
 @app.route("/read", methods=["POST"])
-def read():
-    """Read file, return content. No LLM."""
+def read_file():
     d = request.json or {}
     path = d.get("path","").strip()
     if not path: return jsonify({"error":"path required"}), 400
-    limit = d.get("limit", 8000)
-    content = _read(path, limit)
+    content = _read(path, d.get("limit", 8000))
     _count_saved(len(content))
     console.print(Rule(f"[green]read  {path}[/green]"))
-    console.print(f"[dim]{content[:200]}...[/dim]")
     return jsonify({"content": content, "path": path})
 
 @app.route("/grep", methods=["POST"])
 def grep():
-    """
-    Search pattern in file, return matching lines + context.
-    SECRETARY KEY TOOL: Saves reading full files when Claude only needs one section.
-    {"path":"~/foo.py", "pattern":"def process", "context":3}
-    """
     d = request.json or {}
     path    = d.get("path","").strip()
     pattern = d.get("pattern","").strip()
     if not path or not pattern:
         return jsonify({"error":"path and pattern required"}), 400
-    ctx  = d.get("context", 2)
-    ic   = d.get("ignore_case", True)
-    ts   = datetime.now().strftime("%H:%M:%S")
+    ts = datetime.now().strftime("%H:%M:%S")
     console.print(Rule(f"[green]grep  {ts}[/green]"))
-    console.print(f"[dim]{path} / {pattern}[/dim]")
-    result = _grep_file(path, pattern, ctx, ic)
-    _count_saved(len(_read(path, 99999)) - len(result))  # chars NOT sent to Claude
+    result = _grep_file(path, pattern, d.get("context", 2), d.get("ignore_case", True))
+    _count_saved(len(_read(path, 99999)) - len(result))
     return jsonify({"matches": result, "path": path, "pattern": pattern})
 
 @app.route("/outline", methods=["POST"])
 def outline():
-    """
-    Extract function/class signatures from a code file. No LLM.
-    SECRETARY KEY TOOL: Claude gets the map without reading the whole file.
-    {"path":"~/foo.py"}
-    """
     d = request.json or {}
     path = d.get("path","").strip()
     if not path: return jsonify({"error":"path required"}), 400
     ts = datetime.now().strftime("%H:%M:%S")
     console.print(Rule(f"[green]outline  {ts}[/green]"))
     result = _outline(path)
-    full_size = len(_read(path, 99999))
-    _count_saved(full_size - len(result))
+    _count_saved(len(_read(path, 99999)) - len(result))
     console.print(f"[dim]{result[:400]}[/dim]")
     return jsonify({"outline": result, "path": path})
 
 @app.route("/tree", methods=["POST"])
 def tree():
-    """
-    Compact directory tree. No LLM.
-    {"path":"~/Desktop/project", "depth":2}
-    """
     d = request.json or {}
     path  = d.get("path","").strip() or "~/Desktop"
     depth = int(d.get("depth", 2))
-    excl  = d.get("exclude", "__pycache__,.git,node_modules,.DS_Store")
     ts    = datetime.now().strftime("%H:%M:%S")
     console.print(Rule(f"[green]tree  {ts}[/green]"))
-    result = _tree(path, depth, excl)
-    _count_saved(len(result) * 3)  # tree is much denser than ls -la
-    console.print(f"[dim]{result[:400]}[/dim]")
+    result = _tree(path, depth, d.get("exclude", "__pycache__,.git,node_modules,.DS_Store"))
+    _count_saved(len(result) * 3)
     return jsonify({"tree": result, "path": path})
 
 @app.route("/exists", methods=["POST"])
 def exists():
-    """
-    Check if file/dir exists. No LLM. Zero cost.
-    {"path":"~/Desktop/file.py"}
-    """
     d = request.json or {}
     path = d.get("path","").strip()
     if not path: return jsonify({"error":"path required"}), 400
@@ -576,12 +474,7 @@ def exists():
     return jsonify(info)
 
 @app.route("/write", methods=["POST"])
-def write():
-    """
-    Write content to file. No LLM.
-    SECRETARY KEY TOOL: Claude delegates file writes here, saves Edit/Write tool round-trips.
-    {"path":"~/foo.py", "content":"..."}
-    """
+def write_file():
     d = request.json or {}
     path    = d.get("path","").strip()
     content = d.get("content","")
@@ -591,18 +484,12 @@ def write():
     try:
         result = _write_file(path, content)
         _count_saved(len(content))
-        console.print(f"[dim]{result}[/dim]")
         return jsonify({"result": result, "path": path, "chars": len(content)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route("/patch", methods=["POST"])
 def patch():
-    """
-    Find-and-replace in file. No LLM.
-    SECRETARY KEY TOOL: Small targeted edits without Claude reading the full file.
-    {"path":"~/foo.py", "old":"text to find", "new":"replacement"}
-    """
     d = request.json or {}
     path = d.get("path","").strip()
     old  = d.get("old","")
@@ -612,22 +499,14 @@ def patch():
     console.print(Rule(f"[green]patch  {ts}[/green]"))
     try:
         result = _patch_file(path, old, new)
-        console.print(f"[dim]{result}[/dim]")
         return jsonify({"result": result})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route("/summarize", methods=["POST"])
 def summarize():
-    """
-    Compress file or text → bullet points via local LLM.
-    Claude calls this instead of reading large files directly.
-    {"path":"~/foo.py", "focus":"what to extract"}
-    {"text":"...", "focus":"..."}
-    """
     d = request.json or {}
     focus = d.get("focus", "key logic and structure")
-
     if "path" in d:
         content = _read(d["path"], limit=7000)
         label = d["path"]
@@ -636,52 +515,139 @@ def summarize():
         label = "text"
     else:
         return jsonify({"error": "path or text required"}), 400
-
     if content.startswith("File not found"):
         return jsonify({"error": content}), 404
-
     full_len = len(content)
     ts = datetime.now().strftime("%H:%M:%S")
     console.print(Rule(f"[magenta]summarize  {ts}[/magenta]"))
-    console.print(f"[yellow]▶ {label} | focus: {focus}[/yellow]\n")
-
-    prompt = f"Focus on: {focus}\n\nContent:\n{content}"
-    result = llm(prompt,
+    result = llm(f"Focus on: {focus}\n\nContent:\n{content}",
                  system="Summarize in ≤6 concise bullet points. Facts only. No preamble.\n",
                  max_tokens=400)
     _count_saved(full_len - len(result))
     console.print(Panel(result, title="[magenta]summary[/magenta]", border_style="magenta"))
-    return jsonify({"summary": result, "source": label, "original_chars": full_len, "summary_chars": len(result)})
+    return jsonify({"summary": result, "source": label, "original_chars": full_len})
 
 @app.route("/codegen", methods=["POST"])
 def codegen():
-    """
-    Code generation via local LLM.
-    {"task":"write X", "lang":"python"}
-    """
     d = request.json or {}
     task = d.get("task","").strip()
     lang = d.get("lang","python")
     if not task: return jsonify({"error":"task required"}), 400
     if st.status == "WORKING": return jsonify({"error":"busy"}), 429
-
     ts = datetime.now().strftime("%H:%M:%S")
     console.print(Rule(f"[cyan]codegen  {ts}[/cyan]"))
-    console.print(f"[yellow]▶ {task}[/yellow]\n")
-
-    result = llm(task,
-                 system=f"Output {lang} code only. No explanation. No markdown fences.\n",
+    result = llm(task, system=f"Output {lang} code only. No explanation. No markdown fences.\n",
                  max_tokens=700)
     console.print(Panel(result, title="[cyan]code[/cyan]", border_style="cyan"))
     st.count += 1
     mem.record(st.count, task, result[:200])
     return jsonify({"code": result, "lang": lang})
 
+@app.route("/explain", methods=["POST"])
+def explain():
+    d = request.json or {}
+    if "path" in d:
+        content = _read(d["path"], limit=4000)
+        label = d["path"]
+        if content.startswith("File not found"):
+            return jsonify({"error": content}), 404
+    elif "code" in d:
+        content = d["code"][:4000]
+        label = "snippet"
+    else:
+        return jsonify({"error": "path or code required"}), 400
+    ts = datetime.now().strftime("%H:%M:%S")
+    console.print(Rule(f"[blue]explain  {ts}[/blue]"))
+    result = llm(f"Explain this code:\n\n{content}",
+                 system="One sentence summary, then bullet points for key logic. No fences.\n",
+                 max_tokens=400)
+    _count_saved(len(content))
+    console.print(Panel(result[:600], title="[blue]explanation[/blue]", border_style="blue"))
+    return jsonify({"explanation": result, "source": label})
+
+@app.route("/fix", methods=["POST"])
+def fix():
+    d = request.json or {}
+    error_msg = d.get("error", "").strip()
+    code_ctx  = d.get("code", "")[:3000]
+    if not error_msg: return jsonify({"error": "error field required"}), 400
+    ts = datetime.now().strftime("%H:%M:%S")
+    console.print(Rule(f"[red]fix  {ts}[/red]"))
+    prompt = f"Error:\n{error_msg}\n"
+    if code_ctx:
+        prompt += f"\nCode context:\n{code_ctx}\n"
+    prompt += "\nWhat is the fix?"
+    result = llm(prompt,
+                 system="One sentence root cause, then the corrected code or line. No fences.\n",
+                 max_tokens=400)
+    console.print(Panel(result[:600], title="[red]fix[/red]", border_style="red"))
+    return jsonify({"fix": result})
+
+@app.route("/test", methods=["POST"])
+def gen_tests():
+    d = request.json or {}
+    fn_name = d.get("function", "")
+    if "path" in d:
+        content = _read(d["path"], limit=3000)
+        if fn_name:
+            content = _grep_file(d["path"], rf"def {fn_name}", context=15) or content
+        label = d["path"]
+    elif "code" in d:
+        content = d["code"][:3000]
+        label = "snippet"
+    else:
+        return jsonify({"error": "path or code required"}), 400
+    ts = datetime.now().strftime("%H:%M:%S")
+    console.print(Rule(f"[yellow]test  {ts}[/yellow]"))
+    target = f"for the function `{fn_name}`" if fn_name else "for the code"
+    result = llm(f"Write pytest unit tests {target}:\n\n{content}",
+                 system="Output only the test code. Use pytest. No fences.\n",
+                 max_tokens=600, mode="code")
+    console.print(Panel(result[:800], title="[yellow]tests[/yellow]", border_style="yellow"))
+    _count_saved(len(content))
+    return jsonify({"tests": result, "source": label})
+
+@app.route("/review", methods=["POST"])
+def review():
+    d = request.json or {}
+    if "path" in d:
+        content = _read(d["path"], limit=3000)
+        label = d["path"]
+        if content.startswith("File not found"):
+            return jsonify({"error": content}), 404
+    elif "code" in d:
+        content = d["code"][:3000]
+        label = "snippet"
+    else:
+        return jsonify({"error": "path or code required"}), 400
+    ts = datetime.now().strftime("%H:%M:%S")
+    console.print(Rule(f"[magenta]review  {ts}[/magenta]"))
+    result = llm(f"Review this code:\n\n{content}",
+                 system="Format: BUGS: (list or 'none'), IMPROVEMENTS: (top 2-3), VERDICT: (one line). No fences.\n",
+                 max_tokens=350)
+    _count_saved(len(content))
+    console.print(Panel(result[:600], title="[magenta]review[/magenta]", border_style="magenta"))
+    return jsonify({"review": result, "source": label})
+
+@app.route("/git_summary", methods=["POST"])
+def git_summary():
+    d = request.json or {}
+    repo_path = os.path.expanduser(d.get("path", "."))
+    n = int(d.get("n", 10))
+    ts = datetime.now().strftime("%H:%M:%S")
+    console.print(Rule(f"[cyan]git_summary  {ts}[/cyan]"))
+    log_raw = _shell(f"git -C {repo_path} log --oneline --stat -{n} 2>&1")
+    if "not a git repository" in log_raw.lower():
+        return jsonify({"error": f"Not a git repo: {repo_path}"}), 400
+    result = llm(f"Summarize these recent git commits in plain English:\n\n{log_raw}",
+                 system="2-4 bullet points. Focus on WHAT changed and WHY. No fences.\n",
+                 max_tokens=250)
+    _count_saved(len(log_raw))
+    console.print(Panel(result, title="[cyan]git summary[/cyan]", border_style="cyan"))
+    return jsonify({"summary": result, "commits_analyzed": n})
+
 @app.route("/batch", methods=["POST"])
 def batch():
-    """Run multiple tasks at once. Secretary's bulk work path.
-    {"tasks": [{"type":"run","cmd":"..."}, {"type":"grep","path":"...","pattern":"..."}]}
-    """
     d = request.json or {}
     tasks = d.get("tasks", [])
     if not tasks: return jsonify({"error": "tasks required"}), 400
@@ -716,177 +682,16 @@ def batch():
 @app.route("/memory/clear", methods=["POST"])
 def memory_clear():
     mem.clear()
-    console.print("[yellow]memory cleared[/yellow]")
     return jsonify({"cleared": True, "notes": mem.notes})
 
 @app.route("/note", methods=["POST"])
 def note():
-    """Save a key-value note to persistent memory."""
     d = request.json or {}
     key = d.get("key","").strip()
     val = d.get("value","").strip()
     if not key or not val: return jsonify({"error":"key and value required"}), 400
     mem.save(key, val)
-    console.print(f"[green]note:[/green] {key} = {val}")
     return jsonify({"saved": {key: val}})
-
-@app.route("/explain", methods=["POST"])
-def explain():
-    """
-    Explain what a file or code snippet does. Uses local LLM.
-    {"path": "~/project/utils.py"}  OR  {"code": "def foo(): ...", "lang": "python"}
-    """
-    d = request.json or {}
-    if "path" in d:
-        content = _read(d["path"], limit=4000)
-        label = d["path"]
-        if content.startswith("File not found"):
-            return jsonify({"error": content}), 404
-    elif "code" in d:
-        content = d["code"][:4000]
-        label = "snippet"
-    else:
-        return jsonify({"error": "path or code required"}), 400
-
-    ts = datetime.now().strftime("%H:%M:%S")
-    console.print(Rule(f"[blue]explain  {ts}[/blue]"))
-    result = llm(
-        f"Explain this code:\n\n{content}",
-        system="Give a concise plain-English explanation. Lead with one sentence summary, then bullet points for key logic. No fences.\n",
-        max_tokens=400,
-    )
-    _count_saved(len(content))
-    console.print(Panel(result[:600], title="[blue]explanation[/blue]", border_style="blue"))
-    return jsonify({"explanation": result, "source": label})
-
-
-@app.route("/fix", methods=["POST"])
-def fix():
-    """
-    Given an error + optional code context, suggest a fix. Uses local LLM.
-    {"error": "TypeError: ...", "code": "...", "lang": "python"}
-    """
-    d = request.json or {}
-    error_msg = d.get("error", "").strip()
-    code_ctx  = d.get("code", "")[:3000]
-    if not error_msg:
-        return jsonify({"error": "error field required"}), 400
-
-    ts = datetime.now().strftime("%H:%M:%S")
-    console.print(Rule(f"[red]fix  {ts}[/red]"))
-
-    prompt = f"Error:\n{error_msg}\n"
-    if code_ctx:
-        prompt += f"\nCode context:\n{code_ctx}\n"
-    prompt += "\nWhat is the fix?"
-
-    result = llm(
-        prompt,
-        system="Give a direct fix. One sentence root cause, then the corrected code or line. No fences.\n",
-        max_tokens=400,
-    )
-    console.print(Panel(result[:600], title="[red]fix[/red]", border_style="red"))
-    return jsonify({"fix": result})
-
-
-@app.route("/test", methods=["POST"])
-def gen_tests():
-    """
-    Generate unit tests for a function or file. Uses local LLM.
-    {"path": "~/project/utils.py", "function": "parse_csv"}  OR  {"code": "def foo(): ..."}
-    """
-    d = request.json or {}
-    fn_name = d.get("function", "")
-    if "path" in d:
-        content = _read(d["path"], limit=3000)
-        if fn_name:
-            # grep for just the target function
-            content = _grep_file(d["path"], rf"def {fn_name}", context=15) or content
-        label = d["path"]
-    elif "code" in d:
-        content = d["code"][:3000]
-        label = "snippet"
-    else:
-        return jsonify({"error": "path or code required"}), 400
-
-    ts = datetime.now().strftime("%H:%M:%S")
-    console.print(Rule(f"[yellow]test  {ts}[/yellow]"))
-
-    target = f"for the function `{fn_name}`" if fn_name else "for the code"
-    result = llm(
-        f"Write pytest unit tests {target}:\n\n{content}",
-        system="Output only the test code. Use pytest. No fences. No imports except what's needed.\n",
-        max_tokens=600,
-        mode="code",
-    )
-    console.print(Panel(result[:800], title="[yellow]tests[/yellow]", border_style="yellow"))
-    _count_saved(len(content))
-    return jsonify({"tests": result, "source": label})
-
-
-@app.route("/review", methods=["POST"])
-def review():
-    """
-    Quick code review: bugs, style, improvements. Uses local LLM.
-    {"path": "~/project/file.py"}  OR  {"code": "..."}
-    """
-    d = request.json or {}
-    if "path" in d:
-        content = _read(d["path"], limit=3000)
-        label = d["path"]
-        if content.startswith("File not found"):
-            return jsonify({"error": content}), 404
-    elif "code" in d:
-        content = d["code"][:3000]
-        label = "snippet"
-    else:
-        return jsonify({"error": "path or code required"}), 400
-
-    ts = datetime.now().strftime("%H:%M:%S")
-    console.print(Rule(f"[magenta]review  {ts}[/magenta]"))
-
-    result = llm(
-        f"Review this code:\n\n{content}",
-        system=(
-            "Give a terse code review. Format: "
-            "BUGS: (list actual bugs or 'none'), "
-            "IMPROVEMENTS: (top 2-3 suggestions), "
-            "VERDICT: (one line). No fences.\n"
-        ),
-        max_tokens=350,
-    )
-    _count_saved(len(content))
-    console.print(Panel(result[:600], title="[magenta]review[/magenta]", border_style="magenta"))
-    return jsonify({"review": result, "source": label})
-
-
-@app.route("/git_summary", methods=["POST"])
-def git_summary():
-    """
-    Summarize recent git activity in plain English. Uses local LLM + shell.
-    {"path": "~/project", "n": 10}  — summarize last N commits
-    """
-    d = request.json or {}
-    repo_path = os.path.expanduser(d.get("path", "."))
-    n = int(d.get("n", 10))
-    ts = datetime.now().strftime("%H:%M:%S")
-    console.print(Rule(f"[cyan]git_summary  {ts}[/cyan]"))
-
-    log_raw = _shell(
-        f"git -C {repo_path} log --oneline --stat -{n} 2>&1"
-    )
-    if "not a git repository" in log_raw.lower():
-        return jsonify({"error": f"Not a git repo: {repo_path}"}), 400
-
-    result = llm(
-        f"Summarize these recent git commits in plain English:\n\n{log_raw}",
-        system="2-4 bullet points. Focus on WHAT changed and WHY (from messages). No fences.\n",
-        max_tokens=250,
-    )
-    _count_saved(len(log_raw))
-    console.print(Panel(result, title="[cyan]git summary[/cyan]", border_style="cyan"))
-    return jsonify({"summary": result, "commits_analyzed": n})
-
 
 # ── main ─────────────────────────────────────────────────────────────────────────
 
@@ -899,16 +704,19 @@ if __name__ == "__main__":
         daemon=True
     ).start()
 
+    fan_info = fan_status()
     console.print(Panel(
-        "[bold cyan]Wingman v1.0[/bold cyan]  ·  Local LLM co-processor for Claude Code & Codex\n\n"
-        "[bold]Zero-LLM (instant):[/bold]\n"
+        "[bold cyan]Wingman v1.1[/bold cyan]  ·  Claude Code's local co-processor\n\n"
+        "[bold]Zero-LLM endpoints (<50ms):[/bold]\n"
         "  [green]/run /read /grep /outline /tree /exists /write /patch[/green]\n\n"
-        "[bold]Local-LLM (saves Claude API tokens):[/bold]\n"
+        "[bold]Local-LLM endpoints (0 API tokens):[/bold]\n"
         "  [cyan]/ask /summarize /codegen /explain /fix /test /review /git_summary /batch[/cyan]\n\n"
+        f"[bold]Model:[/bold]  {MODEL}  (family: {adapter.family})\n"
+        f"[bold]Fan:[/bold]   {'available' if fan_info['available'] else 'not configured'}  "
+        f"(platform: {fan_info['platform']})\n"
         f"[bold]Memory:[/bold] {len(mem.notes)} notes · {len(mem.history)} past tasks\n"
-        f"[bold]Model:[/bold] {MODEL}\n"
         "[dim]http://localhost:7860[/dim]",
-        border_style="cyan", title="[bold cyan]Wingman[/bold cyan]"
+        border_style="cyan", title="[bold]Ready[/bold]"
     ))
     console.print("[green]✓ Waiting...[/green]\n")
 

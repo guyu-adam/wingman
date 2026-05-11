@@ -2,19 +2,19 @@
 
 **Local LLM co-processor for AI coding assistants.**
 
-Runs a small Ollama model locally so Claude Code, Codex, Aider, or Cursor can delegate token-heavy subtasks without hitting the cloud API. Every file read, code explanation, grep, or unit-test generation that Wingman handles is one less billable Claude/GPT call.
+Runs a small Ollama model locally so Claude Code, Codex, Aider, or Cursor can delegate token-heavy subtasks without hitting the cloud API. Every file outline, code explanation, grep, or unit-test generation that Wingman handles is one less billable API call.
 
 ```
-Your AI coding assistant (Claude Code, Codex, Aider, Cursor)
+Your AI assistant (Claude Code / Codex / Aider / Cursor)
               │  HTTP POST → localhost:7860
               ▼
-         Wingman (Flask + Ollama)
+         Wingman v1.1 (Flask + Ollama)
               │
     ┌─────────┴────────────┐
-    │ Zero-LLM (<50ms)     │  Local-LLM (no cloud)
-    │ /grep /outline /tree │  /explain /fix /test
-    │ /exists /write /patch│  /review /codegen
-    │ /run /read           │  /summarize /git_summary
+    │ Zero-LLM (<50ms)     │  Local-LLM (0 API tokens)
+    │ /grep /outline /tree │  /explain /fix /test /review
+    │ /exists /write /patch│  /codegen /summarize /git_summary
+    │ /run /read           │  /ask /batch
     └──────────────────────┘
 ```
 
@@ -22,14 +22,13 @@ Your AI coding assistant (Claude Code, Codex, Aider, Cursor)
 
 | Task | Without Wingman | With Wingman | Saving |
 |------|----------------|--------------|--------|
-| Read 600-line file | ~8 000 tokens | — | — |
-| `/outline` (function map) | — | ~400 tokens returned | **~7 600 tokens** |
-| `/grep` (find one function) | — | ~130 tokens returned | **~7 870 tokens** |
-| `/explain` a module | — | local LLM, 0 API tokens | **100%** |
-| `/fix` an error | — | local LLM, 0 API tokens | **100%** |
-| `/test` generate tests | — | local LLM, 0 API tokens | **100%** |
+| Map a 600-line file | ~8 000 tokens | `W.outline()` → ~100 tokens | **~7 900 tokens** |
+| Find one function | ~8 000 tokens | `W.grep()` → ~50 tokens | **~7 950 tokens** |
+| Explain a module | ~8 000 tokens (read+reason) | `W.explain()` → 0 API tokens | **100%** |
+| Generate unit tests | ~500 tokens (output) | `W.test()` → 0 API tokens | **100%** |
+| Fix an error | ~300 tokens | `W.fix()` → 0 API tokens | **100%** |
 
-Zero-LLM endpoints respond in **<50ms**. Local-LLM endpoints use Ollama on your machine — no internet, no API key, no cost.
+Zero-LLM endpoints respond in **<50ms**. Local-LLM endpoints use Ollama on your machine — no internet, no API key, no billing.
 
 ## Quick start
 
@@ -37,13 +36,12 @@ Zero-LLM endpoints respond in **<50ms**. Local-LLM endpoints use Ollama on your 
 
 ```bash
 # https://ollama.com
-ollama pull qwen3.5:4b        # 3.4 GB — recommended (latest, Apple Silicon)
-# or
-ollama pull qwen2.5:4b        # also supported
+ollama pull qwen3.5:4b        # 3.4 GB — recommended (Apple Silicon, latest Qwen)
 
+# Create the wingman-qwen alias (keeps server config stable across model upgrades)
 ollama create wingman-qwen -f Modelfile.qwen3.5-4b
 
-# Semantic memory (optional)
+# Optional: semantic memory
 ollama pull nomic-embed-text
 ```
 
@@ -51,8 +49,9 @@ ollama pull nomic-embed-text
 
 ```bash
 pip install flask requests numpy rich
+bash start.sh                     # auto-detects conda env, starts Ollama if needed
+# or manually:
 python main.py
-# Server at http://localhost:7860
 ```
 
 ### 3. Use from Claude Code (or any script)
@@ -61,31 +60,83 @@ python main.py
 import sys; sys.path.insert(0, '/path/to/wingman')
 from client import W   # W for Wingman  (J also works for backward compat)
 
-# ── Zero-LLM (instant) ────────────────────────────────────────────────────
-W.outline("~/project/app.py")              # function/class map
-W.grep("~/project/app.py", "def process") # search with context
-W.tree("~/project", depth=2)              # directory tree
-W.exists("~/project/.env")                # existence check
-W.write("~/project/config.py", "KEY=1")   # write file
-W.patch("~/project/config.py", "1", "2")  # find-and-replace
-W.run("pytest --tb=short -q")             # shell command
+# ── Zero-LLM (instant) ────────────────────────────────────────────────────────
+W.outline("~/project/app.py")                    # function/class map
+W.grep("~/project/app.py", "def process", ctx=3) # search with context
+W.tree("~/project", depth=2)                     # directory tree
+W.exists("~/project/.env")                       # existence check
+W.write("~/project/config.py", "KEY=1")          # write file
+W.patch("~/project/config.py", "1", "2")         # find-and-replace
+W.run("pytest --tb=short -q")                    # shell command
 
-# ── Local-LLM (no API cost) ───────────────────────────────────────────────
-W.explain("~/project/utils.py")            # plain-English explanation
-W.fix("TypeError: NoneType", code="...")   # error → fix suggestion
-W.test("~/project/utils.py", function="parse_csv")  # generate tests
-W.review("~/project/utils.py")            # bugs + improvements
-W.git_summary("~/project", n=10)          # recent commits in plain English
+# ── Local-LLM (0 API tokens) ──────────────────────────────────────────────────
+W.explain("~/project/utils.py")                  # plain-English explanation
+W.fix("TypeError: NoneType", code="...")         # error → fix suggestion
+W.test("~/project/utils.py", function="parse")   # generate pytest tests
+W.review("~/project/utils.py")                   # bugs + improvements
+W.git_summary("~/project", n=10)                 # recent commits in plain English
 W.summarize("~/project/big_file.py", focus="error handling")
-W.codegen("write a function to debounce async calls")
+W.codegen("write a debounce function in python")
 
-# ── Batch (one HTTP round-trip) ───────────────────────────────────────────
+# ── Batch (one HTTP round-trip) ───────────────────────────────────────────────
 W.batch([
     ("outline", "~/project/app.py"),
     ("run",     "git status"),
     ("exists",  "~/project/.env"),
 ])
 ```
+
+## Auto-start with Claude Code
+
+Add this to your `CLAUDE.md` so Wingman starts automatically:
+
+```python
+import sys; sys.path.insert(0, '/path/to/wingman')
+from client import W
+try:
+    W.status()
+except Exception:
+    import subprocess, time
+    subprocess.Popen(['bash', '/path/to/wingman/start.sh'])
+    time.sleep(4)
+```
+
+See `WINGMAN_FOR_CLAUDE.md` for the full decision-rule cheatsheet.
+
+## Supported models
+
+| Modelfile | Base | Size | Notes |
+|-----------|------|------|-------|
+| `Modelfile.qwen3.5-4b` | qwen3.5:4b | 3.4 GB | **Default** — latest Qwen, Apple Silicon |
+| `Modelfile.qwen2.5-4b` | qwen2.5:4b | 2.5 GB | Lighter, no thinking mode |
+| `Modelfile.qwen3-8b`   | qwen3:8b   | 5.2 GB | Higher quality, 2× slower |
+| `Modelfile.gemma3-4b`  | gemma3:4b  | 3.3 GB | Google, good for English prose |
+
+### Other supported model families (no custom Modelfile needed)
+
+```bash
+# Switch to any of these — model_adapter.py auto-detects format:
+WINGMAN_MODEL=mistral:7b       bash start.sh   # Mistral [INST] format
+WINGMAN_MODEL=llama3.1:8b      bash start.sh   # Llama3 ChatML
+WINGMAN_MODEL=phi4:latest      bash start.sh   # Phi4 format
+WINGMAN_MODEL=deepseek-coder:6.7b bash start.sh # DeepSeek code specialist
+WINGMAN_MODEL=gemma3:4b        bash start.sh   # Gemma turns format
+```
+
+`model_adapter.py` handles prompt formatting, thinking-mode suppression, and response extraction for each family automatically.
+
+## Fan control
+
+Wingman automatically spins fans to max during LLM inference and restores auto mode when inference finishes, preventing thermal throttling on sustained workloads.
+
+| Platform | Tool | Install |
+|----------|------|---------|
+| macOS | `smcFanControl` CLI | `brew install smcfancontrol` |
+| Linux | sysfs `/sys/class/hwmon` | built-in (may need sudo) |
+| Linux (laptop) | `nbfc` | `apt install nbfc` |
+| Windows | NoteBook FanControl | [github.com/hirschmann/nbfc](https://github.com/hirschmann/nbfc) |
+
+Fan control is optional — Wingman works fine without it, just silently skips it.
 
 ## Endpoint reference
 
@@ -115,57 +166,26 @@ W.batch([
 | `POST /summarize` | `{path, focus}` | `{summary}` |
 | `POST /codegen` | `{task, lang}` | `{code}` |
 | `POST /batch` | `{tasks:[...]}` | `{results:[...]}` |
-| `GET  /status` | — | `{model, tokens_saved_est, ...}` |
-
-## Supported models
-
-| Modelfile | Base | Size | Notes |
-|-----------|------|------|-------|
-| `Modelfile.qwen3.5-4b` | qwen3.5:4b | 3.4 GB | **Default** — latest Qwen, Apple Silicon |
-| `Modelfile.qwen2.5-4b` | qwen2.5:4b | 2.5 GB | Lighter alternative |
-| `Modelfile.qwen3-8b` | qwen3:8b | 5.2 GB | Higher quality, 2× slower |
-| `Modelfile.gemma3-4b` | gemma3:4b | 3.3 GB | Fallback |
-
-```bash
-# Switch model:
-ollama create wingman-qwen -f Modelfile.qwen2.5-4b
-# restart main.py — MODEL = "wingman-qwen" stays the same
-```
+| `GET  /status` | — | `{model, family, fan, tokens_saved_est, ...}` |
 
 ## Benchmark (Apple M-series, qwen3.5:4b)
 
 ```
-Zero-LLM ops:   8 endpoints   avg latency  <50ms   ✓ all pass
-Local-LLM ops:  9 endpoints   avg latency  15–40s  ✓ all pass
+Zero-LLM ops:   8 endpoints   avg latency  <50ms    ✓
+Local-LLM ops:  9 endpoints   avg latency  11-19s   ✓
 
-Token saving per /outline call:     ~7 600 tokens
-Token saving per /grep call:        ~7 870 tokens
+Token saving per /outline call:     ~7 900 tokens
+Token saving per /grep call:        ~7 950 tokens
 Estimated savings per session:      20 000–50 000 tokens
-```
-
-Local-LLM endpoints are slower (15–40s on 4b models) due to chain-of-thought reasoning. Use them for background tasks, not interactive queries.
-
-## Integration examples
-
-**Claude Code hook** — add to your CLAUDE.md:
-```
-When reading large files, prefer W.outline() or W.grep() via Wingman
-instead of Read tool to save context tokens.
-```
-
-**Aider / Cursor** — add to your system prompt or wrapper script:
-```python
-from client import W
-W.explain("path/to/confusing_module.py")  # before asking Aider to modify it
 ```
 
 ## Memory
 
-Wingman stores conversation history with semantic embeddings (`nomic-embed-text`). Relevant past context is injected into `/ask` and `/summarize` calls automatically.
+Wingman stores conversation history with semantic embeddings (`nomic-embed-text`). Relevant past context is injected into `/ask` calls automatically.
 
 ```python
-W.note("project_lang", "Python 3.11, FastAPI")   # persist facts
-W.clear()                                          # reset history
+W.note("project_lang", "Python 3.11, FastAPI")
+W.clear()   # reset history
 ```
 
 ## Requirements
