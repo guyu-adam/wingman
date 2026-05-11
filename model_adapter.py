@@ -18,13 +18,46 @@ Supported families:
 """
 
 import re
+import requests as _req
 from typing import Callable
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Family detection
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _ollama_family(model_name: str) -> str:
+    """Ask Ollama for the actual model family (works for aliases like wingman-qwen)."""
+    try:
+        r = _req.post("http://localhost:11434/api/show",
+                      json={"name": model_name}, timeout=5)
+        det = r.json().get("details", {})
+        fam = (det.get("family") or "").lower()
+        if fam:
+            if "qwen35" in fam or "qwen3.5" in fam:
+                return "qwen3"
+            if "qwen3" in fam:
+                return "qwen3"
+            if "qwen2" in fam:
+                return "qwen2"
+            if "llama3" in fam or "llama-3" in fam:
+                return "llama3"
+            if "llama" in fam:
+                return "llama2"
+            if "mistral" in fam or "mixtral" in fam:
+                return "mistral"
+            if "phi" in fam:
+                return "phi3"
+            if "gemma" in fam:
+                return "gemma"
+            if "deepseek" in fam:
+                return "deepseek-r1" if "r1" in fam else "deepseek"
+    except Exception:
+        pass
+    return ""
+
+
 def detect_family(model_name: str) -> str:
+    # First try name-based detection (fast, no network)
     n = model_name.lower()
     if re.search(r'qwen3\.5|qwen3', n):
         return "qwen3"
@@ -48,7 +81,9 @@ def detect_family(model_name: str) -> str:
         return "deepseek"
     if re.search(r'codellama', n):
         return "llama3"
-    return "default"
+    # Name didn't match — ask Ollama (handles aliases like wingman-qwen)
+    ollama_fam = _ollama_family(model_name)
+    return ollama_fam if ollama_fam else "default"
 
 
 def has_thinking(family: str) -> bool:
