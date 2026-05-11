@@ -37,11 +37,11 @@ Zero-LLM endpoints respond in **<50ms**. Local-LLM endpoints use Ollama on your 
 
 ```bash
 # https://ollama.com
-ollama pull qwen3:4b          # 2.5 GB — recommended for Apple Silicon
+ollama pull qwen3.5:4b        # 3.4 GB — recommended (latest, Apple Silicon)
 # or
 ollama pull qwen2.5:4b        # also supported
 
-ollama create wingman-qwen -f Modelfile.qwen3-4b
+ollama create wingman-qwen -f Modelfile.qwen3.5-4b
 
 # Semantic memory (optional)
 ollama pull nomic-embed-text
@@ -121,8 +121,8 @@ W.batch([
 
 | Modelfile | Base | Size | Notes |
 |-----------|------|------|-------|
-| `Modelfile.qwen3-4b` | qwen3:4b | 2.5 GB | **Default** — fast, Apple Silicon optimized |
-| `Modelfile.qwen2.5-4b` | qwen2.5:4b | 2.5 GB | Alternative — strong instruction following |
+| `Modelfile.qwen3.5-4b` | qwen3.5:4b | 3.4 GB | **Default** — latest Qwen, Apple Silicon |
+| `Modelfile.qwen2.5-4b` | qwen2.5:4b | 2.5 GB | Lighter alternative |
 | `Modelfile.qwen3-8b` | qwen3:8b | 5.2 GB | Higher quality, 2× slower |
 | `Modelfile.gemma3-4b` | gemma3:4b | 3.3 GB | Fallback |
 
@@ -132,7 +132,7 @@ ollama create wingman-qwen -f Modelfile.qwen2.5-4b
 # restart main.py — MODEL = "wingman-qwen" stays the same
 ```
 
-## Benchmark (Apple M-series, qwen3:4b)
+## Benchmark (Apple M-series, qwen3.5:4b)
 
 ```
 Zero-LLM ops:   8 endpoints   avg latency  <50ms   ✓ all pass

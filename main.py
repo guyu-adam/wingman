@@ -27,7 +27,7 @@ EMBED_FILE  = Path(__file__).parent / "embeddings.json"
 OLLAMA      = "http://localhost:11434/api/chat"
 EMBED_URL   = "http://localhost:11434/api/embeddings"
 EMBED_MODEL = "nomic-embed-text"
-MODEL       = "qwen3-4b-wingman"
+MODEL       = "wingman-qwen"
 
 # ── token savings counter ───────────────────────────────────────────────────────
 # Rough estimate: 1 char ≈ 0.4 tokens (Chinese/code mix)
