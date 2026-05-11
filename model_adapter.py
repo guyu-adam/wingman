@@ -1,5 +1,5 @@
 """
-model_adapter.py — Multi-model prompt formatting for Wingman.
+model_adapter.py — Multi-model prompt formatting for Miser.
 
 Detects model family from the model name and returns the correct
 raw prompt format + response post-processor for each family.
@@ -26,7 +26,7 @@ from typing import Callable
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _ollama_family(model_name: str) -> str:
-    """Ask Ollama for the actual model family (works for aliases like wingman-qwen)."""
+    """Ask Ollama for the actual model family (works for aliases like miser-qwen)."""
     try:
         r = _req.post("http://localhost:11434/api/show",
                       json={"name": model_name}, timeout=5)
@@ -81,7 +81,7 @@ def detect_family(model_name: str) -> str:
         return "deepseek"
     if re.search(r'codellama', n):
         return "llama3"
-    # Name didn't match — ask Ollama (handles aliases like wingman-qwen)
+    # Name didn't match — ask Ollama (handles aliases like miser-qwen)
     ollama_fam = _ollama_family(model_name)
     return ollama_fam if ollama_fam else "default"
 
