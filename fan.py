@@ -20,7 +20,6 @@ import sys
 import subprocess
 import platform
 import glob
-import ctypes
 from typing import Optional
 
 PLATFORM = platform.system()   # "Darwin", "Linux", "Windows"
@@ -49,75 +48,95 @@ def _sudo_run(cmd: list, timeout: int = 5) -> tuple[bool, str]:
 #  macOS
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _mac_get_fan_count() -> int:
-    ok, out = _run(["smcFanControl", "--list"])
-    if ok:
-        return max(1, out.count("Fan"))
-    return 2   # MacBook Pro typically has 2
+MFC_APP      = "/Applications/Macs Fan Control.app/Contents/MacOS/Macs Fan Control"
+MFC_BUNDLE   = "com.crystalidea.macsfancontrol"
+MFC_MAX_RPM  = "6200"   # safe max for most MacBook Pro fans
+
+# Saves original settings so fan_auto() can restore them
+_mac_saved: dict = {}
+
+
+def _mfc_installed() -> bool:
+    return os.path.exists(MFC_APP)
+
+
+def _mfc_running() -> bool:
+    ok, _ = _run(["pgrep", "-f", "Macs Fan Control"])
+    return ok
+
+
+def _mfc_write_pref(key: str, value: str):
+    subprocess.run(["defaults", "write", MFC_BUNDLE, key, value],
+                   capture_output=True, timeout=3)
+
+
+def _mfc_reload():
+    """Kill app if running then reopen via 'open -a' so it picks up new defaults."""
+    subprocess.run(["pkill", "-f", "Macs Fan Control"], capture_output=True, timeout=3)
+    import time; time.sleep(0.5)
+    subprocess.Popen(["open", "-a", "Macs Fan Control"],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(2.0)   # give it time to read prefs and connect to SMC
 
 
 def _mac_fan_max() -> bool:
-    # ── method 1: smcFanControl CLI ──────────────────────────────────────────
+    # ── method 1: smcFanControl CLI (brew install smcfancontrol) ─────────────
     ok, _ = _run(["smcFanControl", "--version"])
     if ok:
-        n = _mac_get_fan_count()
-        success = True
-        for i in range(n):
-            ok2, _ = _run(["smcFanControl", "--fan", str(i), "--rpm", "6200"])
-            success = success and ok2
-        if success:
-            return True
-
-    # ── method 2: Macs Fan Control AppleScript ────────────────────────────────
-    mfc = "/Applications/Macs Fan Control.app/Contents/MacOS/Macs Fan Control"
-    if os.path.exists(mfc):
-        script = '''
-        tell application "Macs Fan Control"
-            set fanSpeed to 6000
-        end tell
-        '''
-        ok2, _ = _run(["osascript", "-e", script])
-        if ok2:
-            return True
-
-    # ── method 3: IOKit SMC via ctypes ───────────────────────────────────────
-    return _mac_smc_set_max()
-
-
-def _mac_fan_auto() -> bool:
-    ok, _ = _run(["smcFanControl", "--version"])
-    if ok:
-        n = _mac_get_fan_count()
-        for i in range(n):
-            _run(["smcFanControl", "--fan", str(i), "--auto"])
+        for i in range(2):
+            _run(["smcFanControl", "--fan", str(i), "--rpm", MFC_MAX_RPM])
         return True
-    return _mac_smc_set_auto()
 
+    # ── method 2: Macs Fan Control via defaults + app launch ─────────────────
+    if _mfc_installed():
+        try:
+            import subprocess as _sp, time as _t
+            # Save current prefs before overwriting
+            result = _sp.run(["defaults", "read", MFC_BUNDLE],
+                             capture_output=True, text=True, timeout=3)
+            _mac_saved["raw_prefs"] = result.stdout
+            _mac_saved["Fan_0"]     = _sp.run(
+                ["defaults", "read", MFC_BUNDLE, "Fan_0"],
+                capture_output=True, text=True, timeout=2).stdout.strip()
+            _mac_saved["Fan_1"]     = _sp.run(
+                ["defaults", "read", MFC_BUNDLE, "Fan_1"],
+                capture_output=True, text=True, timeout=2).stdout.strip()
+            _mac_saved["ActivePreset"] = _sp.run(
+                ["defaults", "read", MFC_BUNDLE, "ActivePreset"],
+                capture_output=True, text=True, timeout=2).stdout.strip()
+        except Exception:
+            pass
 
-# macOS IOKit SMC access (no external tools needed) ───────────────────────────
-# Based on: https://github.com/beltex/libsmc  (MIT)
+        _mfc_write_pref("Fan_0", f"1,{MFC_MAX_RPM}")
+        _mfc_write_pref("Fan_1", f"1,{MFC_MAX_RPM}")
+        _mfc_write_pref("ActivePreset", "Custom")
+        _mfc_reload()
+        return True
 
-_SMC_KEY_FAN_NUM   = b"FNum"
-_SMC_KEY_FAN0_MIN  = b"F0Mn"
-_SMC_KEY_FAN0_MAX  = b"F0Mx"
-_SMC_KEY_FAN0_TGT  = b"F0Tg"
-
-def _mac_smc_set_max() -> bool:
-    try:
-        iokit = ctypes.cdll.LoadLibrary(
-            "/System/Library/Frameworks/IOKit.framework/IOKit"
-        )
-        # Opening SMC requires elevated privileges; skip silently if denied
-        iokit.SMCOpen.restype  = ctypes.c_int
-        iokit.SMCClose.restype = ctypes.c_int
-        # If we reach here without error the library loaded; actual SMC writes
-        # need root. Return False so callers know they need smcFanControl.
-    except Exception:
-        pass
     return False
 
 
-def _mac_smc_set_auto() -> bool:
+def _mac_fan_auto() -> bool:
+    # ── method 1: smcFanControl CLI ──────────────────────────────────────────
+    ok, _ = _run(["smcFanControl", "--version"])
+    if ok:
+        for i in range(2):
+            _run(["smcFanControl", "--fan", str(i), "--auto"])
+        return True
+
+    # ── method 2: restore saved MFC prefs ────────────────────────────────────
+    if _mfc_installed():
+        # Restore previously saved values; fall back to OS-auto (preset 0)
+        fan0 = _mac_saved.get("Fan_0", "0")
+        fan1 = _mac_saved.get("Fan_1", "0")
+        preset = _mac_saved.get("ActivePreset", "Predefined:0")
+
+        _mfc_write_pref("Fan_0", fan0 if fan0 else "0")
+        _mfc_write_pref("Fan_1", fan1 if fan1 else "0")
+        _mfc_write_pref("ActivePreset", preset if preset else "Predefined:0")
+        _mfc_reload()
+        return True
+
     return False
 
 
@@ -278,7 +297,9 @@ def fan_status() -> dict:
 def _check_available() -> bool:
     if PLATFORM == "Darwin":
         ok, _ = _run(["smcFanControl", "--version"])
-        return ok
+        if ok:
+            return True
+        return _mfc_installed()   # Macs Fan Control app also works
     elif PLATFORM == "Linux":
         return bool(_linux_hwmon_paths())
     elif PLATFORM == "Windows":
