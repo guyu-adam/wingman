@@ -125,19 +125,6 @@ WINGMAN_MODEL=gemma3:4b        bash start.sh   # Gemma turns format
 
 `model_adapter.py` handles prompt formatting, thinking-mode suppression, and response extraction for each family automatically.
 
-## Fan control
-
-Wingman automatically spins fans to max during LLM inference and restores auto mode when inference finishes, preventing thermal throttling on sustained workloads.
-
-| Platform | Tool | Install |
-|----------|------|---------|
-| macOS | `smcFanControl` CLI | `brew install smcfancontrol` |
-| Linux | sysfs `/sys/class/hwmon` | built-in (may need sudo) |
-| Linux (laptop) | `nbfc` | `apt install nbfc` |
-| Windows | NoteBook FanControl | [github.com/hirschmann/nbfc](https://github.com/hirschmann/nbfc) |
-
-Fan control is optional — Wingman works fine without it, just silently skips it.
-
 ## Endpoint reference
 
 ### Zero-LLM — instant, no model
@@ -166,7 +153,7 @@ Fan control is optional — Wingman works fine without it, just silently skips i
 | `POST /summarize` | `{path, focus}` | `{summary}` |
 | `POST /codegen` | `{task, lang}` | `{code}` |
 | `POST /batch` | `{tasks:[...]}` | `{results:[...]}` |
-| `GET  /status` | — | `{model, family, fan, tokens_saved_est, ...}` |
+| `GET  /status` | — | `{model, family, tokens_saved_est, ...}` |
 
 ## Benchmark (Apple M-series, qwen3.5:4b)
 

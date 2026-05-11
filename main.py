@@ -19,7 +19,6 @@ from rich.panel import Panel
 from rich.rule import Rule
 
 from model_adapter import ModelAdapter
-from fan import fan_max, fan_auto, fan_status
 
 console = Console()
 app = Flask(__name__)
@@ -268,7 +267,7 @@ def _patch_file(path: str, old: str, new: str) -> str:
     p.write_text(updated)
     return f"Patched {path}: replaced 1/{count} occurrence(s), {len(old)}→{len(new)} chars"
 
-# ── LLM call (fan-aware, model-adaptive) ────────────────────────────────────────
+# ── LLM call ────────────────────────────────────────────────────────────────────
 
 def llm(task: str, system: str = "", max_tokens: int = 600, mode: str = "text") -> str:
     is_code    = mode == "code"    or re.search(r'\b(write|def|function|code|implement|class)\b', task, re.I)
@@ -285,23 +284,19 @@ def llm(task: str, system: str = "", max_tokens: int = 600, mode: str = "text") 
 
     payload = adapter.generate_payload(sys_prompt, task, max_tokens=max_tokens)
 
-    fan_max()   # spin up before inference
-    try:
-        for attempt in range(3):
-            try:
-                resp = req.post(adapter.url, json=payload, timeout=240)
-                raw  = adapter.extract_text(resp.json())
-                if raw:
-                    answer = adapter.clean(raw, mode=detected_mode)
-                    if answer:
-                        return answer
-                console.print(f"[dim yellow]empty response, retry {attempt+1}/3[/dim yellow]")
-            except Exception as e:
-                if attempt == 2:
-                    return f"ERROR: {e}"
-        return "(no response)"
-    finally:
-        fan_auto()   # restore auto regardless of outcome
+    for attempt in range(3):
+        try:
+            resp = req.post(adapter.url, json=payload, timeout=240)
+            raw  = adapter.extract_text(resp.json())
+            if raw:
+                answer = adapter.clean(raw, mode=detected_mode)
+                if answer:
+                    return answer
+            console.print(f"[dim yellow]empty response, retry {attempt+1}/3[/dim yellow]")
+        except Exception as e:
+            if attempt == 2:
+                return f"ERROR: {e}"
+    return "(no response)"
 
 # ── routing ──────────────────────────────────────────────────────────────────────
 
@@ -362,7 +357,6 @@ def run_task(task: str, sender: str, system: str = "", max_tokens: int = 600) ->
 
 @app.route("/status")
 def status():
-    fs = fan_status()
     return jsonify({
         "status":           st.status,
         "task":             st.task,
@@ -371,7 +365,6 @@ def status():
         "tokens_saved_est": _tokens_saved,
         "model":            MODEL,
         "model_family":     adapter.family,
-        "fan":              fs,
     })
 
 @app.route("/memory")
@@ -704,7 +697,6 @@ if __name__ == "__main__":
         daemon=True
     ).start()
 
-    fan_info = fan_status()
     console.print(Panel(
         "[bold cyan]Wingman v1.1[/bold cyan]  ·  Claude Code's local co-processor\n\n"
         "[bold]Zero-LLM endpoints (<50ms):[/bold]\n"
@@ -712,8 +704,6 @@ if __name__ == "__main__":
         "[bold]Local-LLM endpoints (0 API tokens):[/bold]\n"
         "  [cyan]/ask /summarize /codegen /explain /fix /test /review /git_summary /batch[/cyan]\n\n"
         f"[bold]Model:[/bold]  {MODEL}  (family: {adapter.family})\n"
-        f"[bold]Fan:[/bold]   {'available' if fan_info['available'] else 'not configured'}  "
-        f"(platform: {fan_info['platform']})\n"
         f"[bold]Memory:[/bold] {len(mem.notes)} notes · {len(mem.history)} past tasks\n"
         "[dim]http://localhost:7860[/dim]",
         border_style="cyan", title="[bold]Ready[/bold]"
