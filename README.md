@@ -1,169 +1,127 @@
 # Miser
 
-**Local LLM token-saver for Claude Code.**
+**本地 LLM 协处理器，专为 Claude Code / Codex / Aider 设计。把耗 token 的任务卸载到本地 Ollama，零云端成本。**
 
-One command installs everything. After that, every Claude Code session automatically offloads file ops and code tasks to a local Ollama model — zero cloud API tokens spent on things that don't need them.
+**Local LLM co-processor for Claude Code, Codex, and Aider. Offload token-heavy tasks to a local Ollama model — zero cloud API cost.**
 
-## Install
+---
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://python.org)
+[![Tests: 62/62](https://img.shields.io/badge/tests-62%2F62%20passing-brightgreen.svg)](TEST_REPORT.md)
+[![Model: qwen3.5:4b](https://img.shields.io/badge/model-qwen3.5%3A4b-orange.svg)](https://ollama.com/library/qwen3.5)
+
+---
+
+## 一键安装 / One-Command Install
 
 ```bash
-git clone https://github.com/guyu-adam/miser
+git clone https://github.com/guyu-adam/miser.git
 bash miser/install.sh
 ```
 
-`install.sh` will:
-1. Install Python dependencies (`flask requests numpy rich`)
-2. Pull `qwen3.5:4b` if not present (~3.4 GB, one-time)
-3. Register a background service — auto-starts on login, auto-restarts on crash
-4. Patch `~/.claude/CLAUDE.md` so Claude Code uses Miser automatically in every project
+安装后重启 Claude Code，它会**自动**使用 Miser，无需任何额外配置。
 
-> **Requirements:** Python 3.9+, [Ollama](https://ollama.com), ~4 GB free RAM, macOS or Linux
+After restart, Claude Code **automatically** uses Miser for every session — no extra config.
 
 ---
 
-## What it saves
+## 它能做什么 / What It Does
 
-| Task | Without Miser | With Miser | Saving |
-|------|--------------|------------|--------|
-| Map a 600-line file | ~8 000 tokens | `W.outline()` → ~100 tokens | **~7 900** |
-| Find one function | ~8 000 tokens | `W.grep()` → ~50 tokens | **~7 950** |
-| Explain a module | ~8 000 tokens | `W.explain()` → 0 API tokens | **100%** |
-| Generate unit tests | ~500 tokens | `W.test()` → 0 API tokens | **100%** |
-| Fix an error | ~300 tokens | `W.fix()` → 0 API tokens | **100%** |
+Claude Code 每次对话都烧大量 token 读文件、分析代码。Miser 在本地运行一个 Flask 服务（端口 7860），拦截这些任务交给本地 LLM（Ollama）处理：
 
-Zero-LLM endpoints respond in **<50ms**. Local-LLM endpoints use Ollama — no internet, no API key, no billing.
+Claude Code burns tokens reading files and analyzing code. Miser runs a local Flask server (port 7860) and intercepts those tasks for a local Ollama model:
+
+| 任务 / Task | 没有 Miser | 用了 Miser | 节省 / Saved |
+|---|---|---|---|
+| 分析大文件结构 / Map file structure | `Read` → ~7 500 tokens | `W.outline(path)` | **~7 500 tokens** |
+| 查找单个函数 / Find one function | `Read` → ~7 800 tokens | `W.grep(path, "fn")` | **~7 800 tokens** |
+| 项目概览 / Project overview | 多次 `ls` | `W.tree(path)` | **~3 000 tokens** |
+| 理解模块 / Explain module | Read + GPT 推理 | `W.explain(path)` | **0 API tokens** |
+| 诊断报错 / Diagnose error | GPT 推理 | `W.fix(error)` | **0 API tokens** |
+| 生成测试 / Write tests | GPT 生成 | `W.test(path)` | **0 API tokens** |
 
 ---
 
-## How it works
+## 实测性能 / Benchmark Results
+
+> 完整报告见 [TEST_REPORT.md](TEST_REPORT.md) · Full report: [TEST_REPORT.md](TEST_REPORT.md)
 
 ```
-Claude Code (or any AI coding tool)
-        │  HTTP POST → localhost:7860
-        ▼
-     Miser  (Flask + Ollama)
-        │
-┌───────┴──────────────────────┐
-│ Zero-LLM  (<50ms)            │  Local-LLM  (0 API tokens)
-│ /grep  /outline  /tree       │  /explain  /fix  /test  /review
-│ /exists  /write  /patch      │  /codegen  /summarize  /ask
-│ /run  /read                  │  /git_summary  /batch
-└──────────────────────────────┘
+Tests passed  :  62 / 62  ✓
+Zero-LLM avg  :  14 ms     (grep, outline, tree, exists, read, write, patch, run, batch)
+Local-LLM avg :   6.8 s    (ask, explain, fix, codegen, test, review, summarize)
+Model families:  17 detected correctly (qwen3/qwen2/llama3/llama2/mistral/phi3/phi4/gemma/deepseek…)
+LLM always-on :  keep_alive=-1, startup warmup thread → first response < 1s after warmup
 ```
-
-After `install.sh` runs, Claude Code reads the decision rules injected into `~/.claude/CLAUDE.md` and routes tasks automatically.
 
 ---
 
-## Usage (once installed)
+## API 速查 / API Reference
 
 ```python
-import sys; sys.path.insert(0, '/path/to/miser')
-from client import W
+from client import W   # W = Miser client
 
-# Zero-LLM — instant
-W.outline("~/project/app.py")                    # function/class map
-W.grep("~/project/app.py", "def process", ctx=3) # search with context
-W.tree("~/project", depth=2)                     # directory tree
-W.exists("~/project/.env")                       # existence check
-W.run("pytest --tb=short -q")                    # shell command
+# ── 零 LLM（本地文件操作，<50ms） / Zero-LLM (local file ops, <50ms) ──
+W.outline(path)                    # 返回函数/类列表 / list functions & classes
+W.grep(path, pattern, ctx=2)       # 搜索代码 / search code
+W.tree(path, depth=2)              # 目录树 / directory tree
+W.exists(path)                     # 检查文件 / check file exists
+W.read(path)                       # 读文件 / read file
+W.write(path, content)             # 写文件 / write file
+W.batch([path1, path2, ...])       # 批量读取 / batch read
+W.run(cmd)                         # 执行命令 / run shell command
 
-# Local-LLM — 0 API tokens
-W.explain("~/project/utils.py")                  # plain-English explanation
-W.fix("TypeError: NoneType", code="...")         # error → fix suggestion
-W.test("~/project/utils.py", function="parse")   # generate pytest tests
-W.review("~/project/utils.py")                   # bugs + improvements
-W.git_summary("~/project", n=10)                 # recent commits summary
-W.codegen("write a debounce function in python") # code generation
-
-# Batch — one round-trip
-W.batch([
-    ("outline", "~/project/app.py"),
-    ("run",     "git status"),
-    ("exists",  "~/project/.env"),
-])
+# ── 本地 LLM（0 API token） / Local LLM (0 API tokens) ──
+W.ask(question)                    # 通用问答 / general Q&A
+W.explain(path)                    # 解释代码 / explain code
+W.fix(error, code=ctx)             # 修复报错 / diagnose & fix error
+W.codegen(task)                    # 生成代码 / generate code
+W.test(path)                       # 生成测试 / generate tests
+W.review(path)                     # 代码审查 / code review
+W.summarize(text)                  # 摘要 / summarize
+W.git_summary()                    # git diff 摘要 / git diff summary
 ```
 
 ---
 
-## Supported models
+## 支持的模型 / Supported Models
 
-| Modelfile | Base | Size | Notes |
-|-----------|------|------|-------|
-| `Modelfile.qwen3.5-4b` | qwen3.5:4b | 3.4 GB | **Default** — Apple Silicon optimised |
-| `Modelfile.qwen2.5-4b` | qwen2.5:4b | 2.5 GB | Lighter, no thinking mode |
-| `Modelfile.qwen3-8b`   | qwen3:8b   | 5.2 GB | Higher quality, 2× slower |
-| `Modelfile.gemma3-4b`  | gemma3:4b  | 3.3 GB | Good for English prose |
+Miser 自动检测模型系列，适配正确的提示格式：
 
-Switch model at any time:
+| 系列 / Family | 代表模型 / Examples |
+|---|---|
+| qwen3 / qwen3.5 | `qwen3.5:4b`（默认）, `qwen3:8b` |
+| qwen2 / qwen2.5 | `qwen2.5:4b`, `qwen2.5:7b` |
+| llama3 | `llama3.1:8b`, `codellama:7b` |
+| mistral | `mistral:7b`, `mixtral:8x7b` |
+| phi3 / phi4 | `phi4:latest`, `phi3:mini` |
+| gemma / gemma3 | `gemma3:4b`, `gemma3:12b` |
+| deepseek | `deepseek-coder:6.7b`, `deepseek-r1:8b` |
 
+切换模型 / Switch model:
 ```bash
 MISER_MODEL=mistral:7b bash start.sh
 ```
 
-`model_adapter.py` auto-detects prompt format and thinking-mode suppression for: qwen3/3.5, qwen2.5, llama3.x, mistral, phi3/4, gemma3, deepseek-coder, deepseek-r1.
-
 ---
 
-## Endpoint reference
-
-### Zero-LLM — instant, no model
-
-| Endpoint | Input | Output |
-|----------|-------|--------|
-| `POST /run` | `{cmd, timeout}` | `{output}` |
-| `POST /read` | `{path, limit}` | `{content}` |
-| `POST /grep` | `{path, pattern, context}` | `{matches}` |
-| `POST /outline` | `{path}` | `{outline}` |
-| `POST /tree` | `{path, depth}` | `{tree}` |
-| `POST /exists` | `{path}` | `{exists, is_file, size}` |
-| `POST /write` | `{path, content}` | `{result}` |
-| `POST /patch` | `{path, old, new}` | `{result}` |
-
-### Local-LLM — Ollama, no cloud API
-
-| Endpoint | Input | Output |
-|----------|-------|--------|
-| `POST /explain` | `{path}` or `{code}` | `{explanation}` |
-| `POST /fix` | `{error, code}` | `{fix}` |
-| `POST /test` | `{path, function}` or `{code}` | `{tests}` |
-| `POST /review` | `{path}` or `{code}` | `{review}` |
-| `POST /git_summary` | `{path, n}` | `{summary}` |
-| `POST /ask` | `{task, max_tokens}` | `{result}` |
-| `POST /summarize` | `{path, focus}` | `{summary}` |
-| `POST /codegen` | `{task, lang}` | `{code}` |
-| `POST /batch` | `{tasks:[...]}` | `{results:[...]}` |
-| `GET  /status` | — | `{model, family, tokens_saved_est, ...}` |
-
----
-
-## Uninstall
-
-```bash
-bash /path/to/miser/uninstall.sh
-```
-
-Removes the background service and the `~/.claude/CLAUDE.md` patch. Ollama models are kept.
-
----
-
-## Memory
-
-Miser stores conversation history with semantic embeddings (`nomic-embed-text`). Relevant past context is injected into `/ask` calls automatically.
-
-```python
-W.note("project_lang", "Python 3.11, FastAPI")
-W.clear()   # reset history
-```
-
----
-
-## Requirements
+## 系统要求 / Requirements
 
 - Python 3.9+
-- [Ollama](https://ollama.com) running locally
-- `pip install flask requests numpy rich`
-- macOS or Linux (Windows: manual start only)
+- [Ollama](https://ollama.com) (自动安装 / auto-installed by `install.sh`)
+- macOS / Linux / Windows (WSL)
+- 推荐 8GB+ RAM（运行 4b 模型）/ 8GB+ RAM recommended for 4b models
+
+---
+
+## 卸载 / Uninstall
+
+```bash
+bash miser/uninstall.sh
+```
+
+---
 
 ## License
 
