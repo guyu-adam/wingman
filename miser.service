@@ -1,0 +1,15 @@
+[Unit]
+Description=Miser — local LLM token-saver for Claude Code
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash __MISER_DIR__/start.sh
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/tmp/miser.log
+StandardError=append:/tmp/miser.log
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

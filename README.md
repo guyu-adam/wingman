@@ -1,84 +1,82 @@
-# Wingman
+# Miser
 
-**Local LLM co-processor for AI coding assistants.**
+**Local LLM token-saver for Claude Code.**
 
-Runs a small Ollama model locally so Claude Code, Codex, Aider, or Cursor can delegate token-heavy subtasks without hitting the cloud API. Every file outline, code explanation, grep, or unit-test generation that Wingman handles is one less billable API call.
+One command installs everything. After that, every Claude Code session automatically offloads file ops and code tasks to a local Ollama model — zero cloud API tokens spent on things that don't need them.
 
-```
-Your AI assistant (Claude Code / Codex / Aider / Cursor)
-              │  HTTP POST → localhost:7860
-              ▼
-         Wingman v1.1 (Flask + Ollama)
-              │
-    ┌─────────┴────────────┐
-    │ Zero-LLM (<50ms)     │  Local-LLM (0 API tokens)
-    │ /grep /outline /tree │  /explain /fix /test /review
-    │ /exists /write /patch│  /codegen /summarize /git_summary
-    │ /run /read           │  /ask /batch
-    └──────────────────────┘
+## Install
+
+```bash
+git clone https://github.com/guyu-adam/miser
+bash miser/install.sh
 ```
 
-## Why
+`install.sh` will:
+1. Install Python dependencies (`flask requests numpy rich`)
+2. Pull `qwen3.5:4b` if not present (~3.4 GB, one-time)
+3. Register a background service — auto-starts on login, auto-restarts on crash
+4. Patch `~/.claude/CLAUDE.md` so Claude Code uses Miser automatically in every project
 
-| Task | Without Wingman | With Wingman | Saving |
-|------|----------------|--------------|--------|
-| Map a 600-line file | ~8 000 tokens | `W.outline()` → ~100 tokens | **~7 900 tokens** |
-| Find one function | ~8 000 tokens | `W.grep()` → ~50 tokens | **~7 950 tokens** |
-| Explain a module | ~8 000 tokens (read+reason) | `W.explain()` → 0 API tokens | **100%** |
-| Generate unit tests | ~500 tokens (output) | `W.test()` → 0 API tokens | **100%** |
+> **Requirements:** Python 3.9+, [Ollama](https://ollama.com), ~4 GB free RAM, macOS or Linux
+
+---
+
+## What it saves
+
+| Task | Without Miser | With Miser | Saving |
+|------|--------------|------------|--------|
+| Map a 600-line file | ~8 000 tokens | `W.outline()` → ~100 tokens | **~7 900** |
+| Find one function | ~8 000 tokens | `W.grep()` → ~50 tokens | **~7 950** |
+| Explain a module | ~8 000 tokens | `W.explain()` → 0 API tokens | **100%** |
+| Generate unit tests | ~500 tokens | `W.test()` → 0 API tokens | **100%** |
 | Fix an error | ~300 tokens | `W.fix()` → 0 API tokens | **100%** |
 
-Zero-LLM endpoints respond in **<50ms**. Local-LLM endpoints use Ollama on your machine — no internet, no API key, no billing.
+Zero-LLM endpoints respond in **<50ms**. Local-LLM endpoints use Ollama — no internet, no API key, no billing.
 
-## Quick start
+---
 
-### 1. Install Ollama + pull a model
+## How it works
 
-```bash
-# https://ollama.com
-ollama pull qwen3.5:4b        # 3.4 GB — recommended (Apple Silicon, latest Qwen)
-
-# Create the wingman-qwen alias (keeps server config stable across model upgrades)
-ollama create wingman-qwen -f Modelfile.qwen3.5-4b
-
-# Optional: semantic memory
-ollama pull nomic-embed-text
+```
+Claude Code (or any AI coding tool)
+        │  HTTP POST → localhost:7860
+        ▼
+     Miser  (Flask + Ollama)
+        │
+┌───────┴──────────────────────┐
+│ Zero-LLM  (<50ms)            │  Local-LLM  (0 API tokens)
+│ /grep  /outline  /tree       │  /explain  /fix  /test  /review
+│ /exists  /write  /patch      │  /codegen  /summarize  /ask
+│ /run  /read                  │  /git_summary  /batch
+└──────────────────────────────┘
 ```
 
-### 2. Start Wingman
+After `install.sh` runs, Claude Code reads the decision rules injected into `~/.claude/CLAUDE.md` and routes tasks automatically.
 
-```bash
-pip install flask requests numpy rich
-bash start.sh                     # auto-detects conda env, starts Ollama if needed
-# or manually:
-python main.py
-```
+---
 
-### 3. Use from Claude Code (or any script)
+## Usage (once installed)
 
 ```python
-import sys; sys.path.insert(0, '/path/to/wingman')
-from client import W   # W for Wingman  (J also works for backward compat)
+import sys; sys.path.insert(0, '/path/to/miser')
+from client import W
 
-# ── Zero-LLM (instant) ────────────────────────────────────────────────────────
+# Zero-LLM — instant
 W.outline("~/project/app.py")                    # function/class map
 W.grep("~/project/app.py", "def process", ctx=3) # search with context
 W.tree("~/project", depth=2)                     # directory tree
 W.exists("~/project/.env")                       # existence check
-W.write("~/project/config.py", "KEY=1")          # write file
-W.patch("~/project/config.py", "1", "2")         # find-and-replace
 W.run("pytest --tb=short -q")                    # shell command
 
-# ── Local-LLM (0 API tokens) ──────────────────────────────────────────────────
+# Local-LLM — 0 API tokens
 W.explain("~/project/utils.py")                  # plain-English explanation
 W.fix("TypeError: NoneType", code="...")         # error → fix suggestion
 W.test("~/project/utils.py", function="parse")   # generate pytest tests
 W.review("~/project/utils.py")                   # bugs + improvements
-W.git_summary("~/project", n=10)                 # recent commits in plain English
-W.summarize("~/project/big_file.py", focus="error handling")
-W.codegen("write a debounce function in python")
+W.git_summary("~/project", n=10)                 # recent commits summary
+W.codegen("write a debounce function in python") # code generation
 
-# ── Batch (one HTTP round-trip) ───────────────────────────────────────────────
+# Batch — one round-trip
 W.batch([
     ("outline", "~/project/app.py"),
     ("run",     "git status"),
@@ -86,44 +84,26 @@ W.batch([
 ])
 ```
 
-## Auto-start with Claude Code
-
-Add this to your `CLAUDE.md` so Wingman starts automatically:
-
-```python
-import sys; sys.path.insert(0, '/path/to/wingman')
-from client import W
-try:
-    W.status()
-except Exception:
-    import subprocess, time
-    subprocess.Popen(['bash', '/path/to/wingman/start.sh'])
-    time.sleep(4)
-```
-
-See `WINGMAN_FOR_CLAUDE.md` for the full decision-rule cheatsheet.
+---
 
 ## Supported models
 
 | Modelfile | Base | Size | Notes |
 |-----------|------|------|-------|
-| `Modelfile.qwen3.5-4b` | qwen3.5:4b | 3.4 GB | **Default** — latest Qwen, Apple Silicon |
+| `Modelfile.qwen3.5-4b` | qwen3.5:4b | 3.4 GB | **Default** — Apple Silicon optimised |
 | `Modelfile.qwen2.5-4b` | qwen2.5:4b | 2.5 GB | Lighter, no thinking mode |
 | `Modelfile.qwen3-8b`   | qwen3:8b   | 5.2 GB | Higher quality, 2× slower |
-| `Modelfile.gemma3-4b`  | gemma3:4b  | 3.3 GB | Google, good for English prose |
+| `Modelfile.gemma3-4b`  | gemma3:4b  | 3.3 GB | Good for English prose |
 
-### Other supported model families (no custom Modelfile needed)
+Switch model at any time:
 
 ```bash
-# Switch to any of these — model_adapter.py auto-detects format:
-WINGMAN_MODEL=mistral:7b       bash start.sh   # Mistral [INST] format
-WINGMAN_MODEL=llama3.1:8b      bash start.sh   # Llama3 ChatML
-WINGMAN_MODEL=phi4:latest      bash start.sh   # Phi4 format
-WINGMAN_MODEL=deepseek-coder:6.7b bash start.sh # DeepSeek code specialist
-WINGMAN_MODEL=gemma3:4b        bash start.sh   # Gemma turns format
+MISER_MODEL=mistral:7b bash start.sh
 ```
 
-`model_adapter.py` handles prompt formatting, thinking-mode suppression, and response extraction for each family automatically.
+`model_adapter.py` auto-detects prompt format and thinking-mode suppression for: qwen3/3.5, qwen2.5, llama3.x, mistral, phi3/4, gemma3, deepseek-coder, deepseek-r1.
+
+---
 
 ## Endpoint reference
 
@@ -155,31 +135,35 @@ WINGMAN_MODEL=gemma3:4b        bash start.sh   # Gemma turns format
 | `POST /batch` | `{tasks:[...]}` | `{results:[...]}` |
 | `GET  /status` | — | `{model, family, tokens_saved_est, ...}` |
 
-## Benchmark (Apple M-series, qwen3.5:4b)
+---
 
-```
-Zero-LLM ops:   8 endpoints   avg latency  <50ms    ✓
-Local-LLM ops:  9 endpoints   avg latency  11-19s   ✓
+## Uninstall
 
-Token saving per /outline call:     ~7 900 tokens
-Token saving per /grep call:        ~7 950 tokens
-Estimated savings per session:      20 000–50 000 tokens
+```bash
+bash /path/to/miser/uninstall.sh
 ```
+
+Removes the background service and the `~/.claude/CLAUDE.md` patch. Ollama models are kept.
+
+---
 
 ## Memory
 
-Wingman stores conversation history with semantic embeddings (`nomic-embed-text`). Relevant past context is injected into `/ask` calls automatically.
+Miser stores conversation history with semantic embeddings (`nomic-embed-text`). Relevant past context is injected into `/ask` calls automatically.
 
 ```python
 W.note("project_lang", "Python 3.11, FastAPI")
 W.clear()   # reset history
 ```
 
+---
+
 ## Requirements
 
 - Python 3.9+
 - [Ollama](https://ollama.com) running locally
 - `pip install flask requests numpy rich`
+- macOS or Linux (Windows: manual start only)
 
 ## License
 

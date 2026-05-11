@@ -1,42 +1,39 @@
 #!/bin/bash
-# Wingman startup script — run this once before / alongside Claude Code.
-# Starts Ollama (if not running) and the Wingman Flask server.
-#
+# Miser startup script.
 # Usage:
-#   bash ~/Desktop/wingman/start.sh           # default model (wingman-qwen)
-#   WINGMAN_MODEL=mistral:7b bash start.sh    # override model
-#   bash start.sh --stop                      # kill server
+#   bash start.sh                       # default model (miser-qwen)
+#   MISER_MODEL=mistral:7b bash start.sh
+#   bash start.sh --stop
 
 set -euo pipefail
 
-WINGMAN_DIR="$(cd "$(dirname "$0")" && pwd)"
+MISER_DIR="$(cd "$(dirname "$0")" && pwd)"
 PORT=7860
-MODEL="${WINGMAN_MODEL:-wingman-qwen}"
-LOGFILE="/tmp/wingman.log"
-PIDFILE="/tmp/wingman.pid"
+MODEL="${MISER_MODEL:-miser-qwen}"
+LOGFILE="/tmp/miser.log"
+PIDFILE="/tmp/miser.pid"
 
-# ── helpers ───────────────────────────────────────────────────────────────────
-green() { echo -e "\033[32m$*\033[0m"; }
-yellow(){ echo -e "\033[33m$*\033[0m"; }
-red()   { echo -e "\033[31m$*\033[0m"; }
+green()  { echo -e "\033[32m$*\033[0m"; }
+yellow() { echo -e "\033[33m$*\033[0m"; }
+red()    { echo -e "\033[31m$*\033[0m"; }
 
-# ── stop mode ─────────────────────────────────────────────────────────────────
+# ── stop ──────────────────────────────────────────────────────────────────────
 if [[ "${1:-}" == "--stop" ]]; then
     if [[ -f "$PIDFILE" ]]; then
-        kill "$(cat "$PIDFILE")" 2>/dev/null && green "Wingman stopped." || yellow "Already stopped."
+        kill "$(cat "$PIDFILE")" 2>/dev/null && green "Miser stopped." || yellow "Already stopped."
         rm -f "$PIDFILE"
     else
-        pkill -f wingman.py 2>/dev/null && green "Wingman stopped." || yellow "Not running."
+        pkill -f "miser\.py" 2>/dev/null && green "Miser stopped." || yellow "Not running."
     fi
     exit 0
 fi
 
-# ── check already running ────────────────────────────────────────────────────
+# ── already running ───────────────────────────────────────────────────────────
 if curl -sf "http://localhost:$PORT/status" >/dev/null 2>&1; then
-    green "Wingman already running on port $PORT."
+    green "Miser already running on port $PORT."
     curl -s "http://localhost:$PORT/status" | python3 -c "
-import sys,json
-d=json.load(sys.stdin)
+import sys, json
+d = json.load(sys.stdin)
 print(f'  model={d[\"model\"]}  family={d.get(\"model_family\",\"?\")}  tasks={d[\"count\"]}  tokens_saved={d[\"tokens_saved_est\"]}')
 "
     exit 0
@@ -46,51 +43,46 @@ fi
 if ! pgrep -x ollama >/dev/null 2>&1; then
     yellow "Starting Ollama..."
     ollama serve > /tmp/ollama.log 2>&1 &
-    sleep 2
+    sleep 3
 fi
 
-# ── ensure wingman-qwen model exists ─────────────────────────────────────────
-if [[ "$MODEL" == "wingman-qwen" ]]; then
-    if ! ollama list 2>/dev/null | grep -q "wingman-qwen"; then
-        yellow "Creating wingman-qwen model..."
-        # prefer newest Modelfile
-        MF="$WINGMAN_DIR/Modelfile.qwen3.5-4b"
-        [[ ! -f "$MF" ]] && MF="$WINGMAN_DIR/Modelfile.qwen3-4b"
-        [[ ! -f "$MF" ]] && MF="$WINGMAN_DIR/Modelfile.qwen2.5-4b"
+# ── ensure miser-qwen model exists ───────────────────────────────────────────
+if [[ "$MODEL" == "miser-qwen" ]]; then
+    if ! ollama list 2>/dev/null | grep -q "miser-qwen"; then
+        yellow "Creating miser-qwen model..."
+        MF="$MISER_DIR/Modelfile.qwen3.5-4b"
+        [[ ! -f "$MF" ]] && MF="$MISER_DIR/Modelfile.qwen3-4b"
+        [[ ! -f "$MF" ]] && MF="$MISER_DIR/Modelfile.qwen2.5-4b"
         if [[ -f "$MF" ]]; then
-            ollama create wingman-qwen -f "$MF"
+            ollama create miser-qwen -f "$MF"
         else
-            red "No Modelfile found in $WINGMAN_DIR — run: ollama pull qwen3.5:4b && ollama create wingman-qwen -f Modelfile.qwen3.5-4b"
+            red "No Modelfile found — run: ollama pull qwen3.5:4b && ollama create miser-qwen -f Modelfile.qwen3.5-4b"
             exit 1
         fi
     fi
 fi
 
-# ── activate conda env if available ──────────────────────────────────────────
-START_CMD="python3 $WINGMAN_DIR/wingman.py"
-
+# ── conda env (optional) ──────────────────────────────────────────────────────
+START_CMD="python3 $MISER_DIR/miser.py"
 if command -v conda &>/dev/null; then
-    if conda env list 2>/dev/null | grep -q "^wingman\|^jarves"; then
-        ENV=$(conda env list 2>/dev/null | grep -E "^wingman|^jarves" | awk '{print $1}' | head -1)
-        START_CMD="conda run -n $ENV python3 $WINGMAN_DIR/wingman.py"
+    if conda env list 2>/dev/null | grep -qE "^miser\b"; then
+        START_CMD="conda run -n miser python3 $MISER_DIR/miser.py"
     fi
 fi
 
 # ── launch ────────────────────────────────────────────────────────────────────
-yellow "Starting Wingman (model=$MODEL)..."
-WINGMAN_MODEL="$MODEL" $START_CMD > "$LOGFILE" 2>&1 &
+yellow "Starting Miser (model=$MODEL)..."
+MISER_MODEL="$MODEL" $START_CMD > "$LOGFILE" 2>&1 &
 echo $! > "$PIDFILE"
 
-# wait for ready
 for i in $(seq 1 15); do
     sleep 1
     if curl -sf "http://localhost:$PORT/status" >/dev/null 2>&1; then
-        green "Wingman ready on http://localhost:$PORT"
-        green "  Log: $LOGFILE"
-        green "  PID: $(cat $PIDFILE)"
+        green "Miser ready on http://localhost:$PORT"
+        green "  Log: $LOGFILE  |  PID: $(cat $PIDFILE)"
         exit 0
     fi
 done
 
-red "Wingman failed to start — check $LOGFILE"
+red "Miser failed to start — check $LOGFILE"
 exit 1

@@ -1,5 +1,5 @@
 """
-Wingman v1.1 — Claude Code's local co-processor.
+Miser v1.0 — Claude Code's local co-processor.
 Two execution paths:
   1. Zero-LLM (<50ms): shell, file read/write/grep/tree/exists/outline/patch
   2. Local LLM (no API cost): summarize, codegen, explain, fix, test, review, git_summary
@@ -27,7 +27,7 @@ MEMORY_FILE = Path(__file__).parent / "memory.json"
 EMBED_FILE  = Path(__file__).parent / "embeddings.json"
 EMBED_URL   = "http://localhost:11434/api/embeddings"
 EMBED_MODEL = "nomic-embed-text"
-MODEL       = os.environ.get("WINGMAN_MODEL", "wingman-qwen")
+MODEL       = os.environ.get("MISER_MODEL", "miser-qwen")
 
 adapter = ModelAdapter(MODEL)
 
@@ -274,7 +274,7 @@ def llm(task: str, system: str = "", max_tokens: int = 600, mode: str = "text") 
     is_bullets = mode == "bullets" or re.search(r'\b(summarize|bullet|list|summary|points)\b', task, re.I)
     detected_mode = "code" if is_code and not is_bullets else ("bullets" if is_bullets else "text")
 
-    sys_prompt = "You are Wingman, Claude Code's local assistant.\nOutput ONLY the final answer, no preamble.\n"
+    sys_prompt = "You are Miser, Claude Code's local assistant.\nOutput ONLY the final answer, no preamble.\n"
     if detected_mode == "text":
         ctx_text = mem.ctx(task)
         if ctx_text:
@@ -698,7 +698,7 @@ if __name__ == "__main__":
     ).start()
 
     console.print(Panel(
-        "[bold cyan]Wingman v1.1[/bold cyan]  ·  Claude Code's local co-processor\n\n"
+        "[bold cyan]Miser v1.0[/bold cyan]  ·  Claude Code's local co-processor\n\n"
         "[bold]Zero-LLM endpoints (<50ms):[/bold]\n"
         "  [green]/run /read /grep /outline /tree /exists /write /patch[/green]\n\n"
         "[bold]Local-LLM endpoints (0 API tokens):[/bold]\n"
