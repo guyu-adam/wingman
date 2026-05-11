@@ -1,0 +1,8 @@
+memory.json
+embeddings.json
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+.env
+*.log
