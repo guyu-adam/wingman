@@ -1,8 +1,14 @@
-memory.json
-embeddings.json
 __pycache__/
-*.pyc
-*.pyo
-.DS_Store
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
 .env
-*.log
+
+# Miser runtime data
+embeddings.json
+memory.json
+/tmp/miser.log
+
+# macOS
+.DS_Store
