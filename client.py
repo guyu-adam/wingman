@@ -19,7 +19,12 @@ Usage:
     W.batch([("outline","~/f.py"),("run","git status")])
     W.status()
     W.clear()
+
+Supervision: LLM results are automatically checked for quality flags.
+Results that fail checks are returned with a [MISER:LOW_CONFIDENCE] prefix —
+treat these as hints, not facts. Use W.verify=False to disable.
 """
+import ast
 import requests
 
 BASE = "http://localhost:7860"
@@ -28,7 +33,57 @@ def _post(path, data):
     r = requests.post(f"{BASE}{path}", json=data, timeout=120)
     return r.json()
 
+# ── Supervision helpers ────────────────────────────────────────────────────────
+
+_HALLUCINATION_PHRASES = [
+    "i don't have access", "i cannot access", "as an ai", "i'm unable to",
+    "i don't know", "i apologize", "unfortunately i", "i don't have information",
+    "please provide", "could you please", "i need more context",
+]
+
+def _flag(text: str, label: str) -> str:
+    return f"[MISER:{label}]\n{text}"
+
+def _check_llm(result, op: str, context: str = ""):
+    """Supervisor: validate LLM output, flag low-quality responses."""
+    if not result or not isinstance(result, str):
+        return result
+    low = result.lower()
+
+    # Flag refusals / hallucination patterns
+    if any(p in low for p in _HALLUCINATION_PHRASES):
+        return _flag(result, "HALLUCINATION_RISK")
+
+    # Flag suspiciously short LLM answers (< 30 chars on complex ops)
+    if op in ("explain", "review", "fix", "codegen") and len(result.strip()) < 30:
+        return _flag(result, "TOO_SHORT")
+
+    # For codegen/test: verify Python syntax
+    if op in ("codegen", "test"):
+        code_block = result
+        # Strip markdown fences if present
+        import re
+        fenced = re.search(r"```(?:python)?\n(.*?)```", result, re.DOTALL)
+        if fenced:
+            code_block = fenced.group(1)
+        try:
+            ast.parse(code_block)
+        except SyntaxError as e:
+            return _flag(result, f"SYNTAX_ERROR:{e.lineno}")
+
+    # For explain/review: check that output references at least some context words
+    if op in ("explain", "review") and context:
+        ctx_words = set(w.lower() for w in context.split() if len(w) > 4)
+        result_words = set(result.lower().split())
+        overlap = ctx_words & result_words
+        if ctx_words and len(overlap) / len(ctx_words) < 0.05:
+            return _flag(result, "CONTEXT_MISMATCH")
+
+    return result
+
 class _W:
+    verify: bool = True   # set to False to skip supervision checks
+
     def ask(self, task, max_tokens=600):
         d = _post("/ask", {"task": task, "from": "claude", "max_tokens": max_tokens})
         return d.get("result") or d.get("error")
@@ -68,20 +123,25 @@ class _W:
     def summarize(self, path_or_text, focus="key logic and structure"):
         key = "path" if ("/" in path_or_text or "~" in path_or_text) else "text"
         d = _post("/summarize", {key: path_or_text, "focus": focus})
-        return d.get("summary") or d.get("error")
+        result = d.get("summary") or d.get("error")
+        return _check_llm(result, "summarize") if self.verify else result
 
     def codegen(self, task, lang="python"):
         d = _post("/codegen", {"task": task, "lang": lang})
-        return d.get("code") or d.get("error")
+        result = d.get("code") or d.get("error")
+        return _check_llm(result, "codegen", context=task) if self.verify else result
 
     def explain(self, path_or_code):
         key = "path" if ("/" in path_or_code or "~" in path_or_code) else "code"
         d = _post("/explain", {key: path_or_code})
-        return d.get("explanation") or d.get("error")
+        result = d.get("explanation") or d.get("error")
+        ctx = path_or_code if key == "code" else ""
+        return _check_llm(result, "explain", context=ctx) if self.verify else result
 
     def fix(self, error_msg, code=""):
         d = _post("/fix", {"error": error_msg, "code": code})
-        return d.get("fix") or d.get("error")
+        result = d.get("fix") or d.get("error")
+        return _check_llm(result, "fix", context=error_msg + " " + code) if self.verify else result
 
     def test(self, path_or_code, function=""):
         key = "path" if ("/" in path_or_code or "~" in path_or_code) else "code"
@@ -89,12 +149,15 @@ class _W:
         if function:
             payload["function"] = function
         d = _post("/test", payload)
-        return d.get("tests") or d.get("error")
+        result = d.get("tests") or d.get("error")
+        return _check_llm(result, "test") if self.verify else result
 
     def review(self, path_or_code):
         key = "path" if ("/" in path_or_code or "~" in path_or_code) else "code"
         d = _post("/review", {key: path_or_code})
-        return d.get("review") or d.get("error")
+        result = d.get("review") or d.get("error")
+        ctx = path_or_code if key == "code" else ""
+        return _check_llm(result, "review", context=ctx) if self.verify else result
 
     def git_summary(self, path=".", n=10):
         d = _post("/git_summary", {"path": path, "n": n})
